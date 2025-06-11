@@ -1,10 +1,11 @@
 {
-	"PORCUPINE_ACCESS_KEY": "YOUR_PORCUPINE_ACCESS_KEY",
-	"WAKE_WORD": "picovoice",
-	"SERVER_URL": "http://YOUR_SERVER_IP:3000",
-	"ROOM_IDENTIFIER": "living_room",
-	"RECORD_DEVICE": "hw:1,0",
-	"PLAYBACK_DEVICE": "hw:0,0",
-	"SAMPLE_RATE": 16000
-  }
-  
+  "SERVER_URL": "http://192.168.1.100:3000",
+  "ROOM_IDENTIFIER": "living_room",
+  "RECORD_DEVICE": "hw:1,0",
+  "PLAYBACK_DEVICE": "hw:0,0",
+  "SAMPLE_RATE": 16000,
+  "POCKETSPHINX_HMM_PATH": "/opt/pocketsphinx/model/en-us/en-us",
+  "POCKETSPHINX_DICT_PATH": "/opt/pocketsphinx/model/en-us/cmudict-en-us.dict",
+  "POCKETSPHINX_KEYPHRASE_NAME": "my_wake_word",
+  "POCKETSPHINX_KEYPHRASE": "jarvis"
+}

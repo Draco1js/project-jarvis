@@ -9,6 +9,7 @@
   "dependencies": {
     "@picovoice/porcupine-node": "^3.0.6",
     "node-arecord": "^0.0.2",
+    "pocketsphinx": "github:mmende/pocketsphinx-node",
     "socket.io-client": "^4.8.0"
   },
   "devDependencies": {

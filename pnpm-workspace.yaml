@@ -1,3 +1,10 @@
 packages:
-  - "pi-client"
-  - "server"
+  - pi-client
+  - server
+
+ignoredBuiltDependencies:
+  - ffi-napi
+  - ref-napi
+
+onlyBuiltDependencies:
+  - pocketsphinx
