@@ -3606,6 +3606,10 @@ name = "jarvis-audio"
 version = "0.1.0"
 
 [[package]]
+name = "jarvis-core"
+version = "0.1.0"
+
+[[package]]
 name = "jarvis-llm"
 version = "0.1.0"
 

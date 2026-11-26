@@ -19,6 +19,7 @@ Platform priority for building and testing: **Windows → macOS → Wayland → 
 | Crate | Responsibility |
 |---|---|
 | `jarvis-app` | GPUI windows, tray, panel, setup wizard. Binary `jarvis`. |
+| `core` | Headless assistant engine: turn state machine, conversation context, provider fallback, barge-in, summaries. Talks to every outside service through port traits so it can be tested with fakes (the main test seam). |
 | `audio` | Mic capture (`cpal`), voice activity detection (`earshot`). |
 | `wake` | Energy gate + Rustpotter. |
 | `stt` | Groq transcription client. |
@@ -34,9 +35,19 @@ Platform priority for building and testing: **Windows → macOS → Wayland → 
 - On wake word or hotkey, a small **floating panel** appears near the bottom centre of the screen the mouse is on. It shows the transcript and reply, then fades out a few seconds after the reply. **The panel must never take keyboard focus** (dictation types into the previously focused app). Clicking it allows typing to Jarvis.
 - The main window holds history and settings.
 
+**Verified 2026-11-26 (gpui-pre 0.3.14 source):** open the panel as `WindowKind::PopUp` with `focus: false`.
+
+- Windows: PopUp gets `WS_EX_TOOLWINDOW | WS_EX_TOPMOST` (always on top, no taskbar button), and `focus: false` shows it with `SW_SHOWNOACTIVATE`, so it does not take focus. Clicking it does activate it (GPUI answers `WM_MOUSEACTIVATE` with `MA_ACTIVATE`), which is what we want for typing.
+- macOS: PopUp is an `NSPanel` with `NonactivatingPanel`, pop-up window level, visible on all Spaces and over full-screen apps. `focus: false` uses `orderFront` instead of `makeKeyAndOrderFront`. It can still become key when clicked.
+- Open a fresh panel window for each activation instead of re-showing a hidden one, since the re-show path was not checked.
+- Wayland (`WindowKind::LayerShell`) and X11 are still to be checked when their turn comes.
+- On macOS the app should also run as an accessory app (no Dock icon) via `LSUIElement`.
+
 ## Voice pipeline
 
 1. **Wake word:** an RMS energy gate wakes Rustpotter only when there is sound. Ship a prebuilt "Jarvis" model; setup offers optional training on the user's voice (3–5 samples) and custom wake words.
+   - **Rustpotter status (checked 2026-11-26):** 3.0.2 is the latest release, and the repo has had no commits since 2023-10-01. It does not compile with current dependencies: its `candle-core` 0.2.2 breaks with newer `half`. With `half` pinned to `=2.3.1` it builds and runs on Linux and passes `cargo check` for Windows (`x86_64-pc-windows-msvc`) and macOS (`aarch64-apple-darwin`). It is pure Rust, so there are no C dependencies to build. Accuracy and CPU use have not been measured yet.
+   - Keep the wake-word detector behind a trait in the `wake` crate so it can be swapped. Fallback: openWakeWord via ONNX if Rustpotter's accuracy is poor or the pin becomes untenable. Forking Rustpotter to update `candle` is the other option.
 2. **Hotkey:** push-to-talk. Default `Ctrl+Alt+Space` (Windows/Linux), `Option+Space` (macOS). Configurable. If the combination is taken, say so in the panel.
 3. **End of speech:** `earshot` VAD. Stop after **1 s** of silence following speech; hard cap **30 s**.
 4. **Speech-to-text:** Groq, `whisper-large-v3-turbo`, one batch upload per utterance. Language auto-detected.
