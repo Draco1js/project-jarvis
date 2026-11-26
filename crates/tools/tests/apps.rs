@@ -158,3 +158,11 @@ fn volume_changes_are_clamped_between_zero_and_a_hundred() {
     assert_eq!(target_level(5, Volume::Set(200)), Some(100));
     assert_eq!(target_level(5, Volume::Mute), None);
 }
+
+#[test]
+fn exec_lines_are_split_respecting_quotes() {
+    assert_eq!(
+        split_exec(r#""/opt/My App/run" --name "a b" 'c d' e\ f"#),
+        ["/opt/My App/run", "--name", "a b", "c d", "e f"]
+    );
+}

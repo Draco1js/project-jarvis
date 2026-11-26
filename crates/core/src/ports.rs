@@ -107,6 +107,10 @@ pub trait ChatProvider: Send {
 pub trait Speaker: Send {
     /// Start saying `text`, replacing anything still being said.
     fn speak(&mut self, text: &str);
+    /// Say `text` after whatever is being said, without cutting it off.
+    fn queue(&mut self, text: &str) {
+        self.speak(text);
+    }
 }
 
 /// A short summary plus search tags, written by the model for a finished
@@ -192,8 +196,8 @@ pub struct Reminder {
 
 /// Saved timers, alarms and reminders. Must survive restarts.
 pub trait Reminders: Send {
-    /// Save a new one and return its id.
-    fn add(&mut self, kind: ReminderKind, text: &str, due: SystemTime) -> i64;
+    /// Save a new one and return its id, or why it could not be saved.
+    fn add(&mut self, kind: ReminderKind, text: &str, due: SystemTime) -> Result<i64, String>;
     /// Every one that has not gone off or been cancelled, soonest first.
     fn pending(&mut self) -> Vec<Reminder>;
     /// Forget one (it went off or was cancelled). False if there was none.

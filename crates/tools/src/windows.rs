@@ -31,8 +31,11 @@ fn reg_query(key: &str, value: &str) -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let name = if value.is_empty() { "(Default)" } else { value };
-    browser::parse_reg_value(&text, name)
+    if value.is_empty() {
+        browser::parse_reg_default(&text)
+    } else {
+        browser::parse_reg_value(&text, value)
+    }
 }
 
 pub fn default_browser() -> (Browser, Option<String>) {

@@ -55,12 +55,24 @@ pub fn transcript(history: &[Message]) -> String {
         .join("\n")
 }
 
+/// The most of a transcript sent for summarising, so a long conversation
+/// cannot make the request slow enough to time out.
+const SUMMARY_MAX_CHARS: usize = 12_000;
+
+/// The last `max` characters of `text`.
+fn tail(text: &str, max: usize) -> &str {
+    match text.char_indices().rev().nth(max.saturating_sub(1)) {
+        Some((i, _)) if text.chars().count() > max => &text[i..],
+        _ => text,
+    }
+}
+
 /// One model call for the summary and tags of `text`. On failure the text is
 /// still worth keeping, so this returns an empty summary instead of an error.
 pub fn summarize(chat: &mut dyn ChatProvider, text: &str) -> Tagged {
     let request = [
         Message::new(Role::System, SUMMARY_PROMPT),
-        Message::new(Role::User, text),
+        Message::new(Role::User, tail(text, SUMMARY_MAX_CHARS)),
     ];
     match chat.chat(&request, &[]) {
         Ok(Reply::Text(reply)) => parse(&reply),

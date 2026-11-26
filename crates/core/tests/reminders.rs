@@ -327,3 +327,15 @@ fn reminder_missed_on_an_earlier_day_says_which_day() {
         }]
     );
 }
+
+#[test]
+fn an_absurdly_long_timer_is_refused() {
+    let mut h = Harness::new();
+    h.chat
+        .will_call("set_timer", json!({"seconds": u64::MAX}))
+        .will_reply("That is too long.");
+
+    h.type_text("Set a timer for ever");
+
+    assert!(h.reminders.all().is_empty());
+}

@@ -16,8 +16,12 @@ fn reminders_survive_a_restart() {
 
     let (tea, call) = {
         let mut store = SqliteReminders::open(&path).unwrap();
-        let tea = store.add(ReminderKind::Timer, "tea", at(1_800_000_300));
-        let call = store.add(ReminderKind::Reminder, "call mum", at(1_800_000_100));
+        let tea = store
+            .add(ReminderKind::Timer, "tea", at(1_800_000_300))
+            .unwrap();
+        let call = store
+            .add(ReminderKind::Reminder, "call mum", at(1_800_000_100))
+            .unwrap();
         (tea, call)
     };
 
@@ -38,7 +42,9 @@ fn removed_reminders_stay_gone_after_a_restart() {
     let path = dir.path().join("jarvis.db");
     {
         let mut store = SqliteReminders::open(&path).unwrap();
-        let alarm = store.add(ReminderKind::Alarm, "", at(1_800_000_000));
+        let alarm = store
+            .add(ReminderKind::Alarm, "", at(1_800_000_000))
+            .unwrap();
         assert!(store.remove(alarm));
         assert!(!store.remove(alarm));
     }
@@ -52,11 +58,15 @@ fn ids_are_not_reused_after_a_restart() {
     let path = dir.path().join("jarvis.db");
     let first = {
         let mut store = SqliteReminders::open(&path).unwrap();
-        let id = store.add(ReminderKind::Timer, "", at(1_800_000_000));
+        let id = store
+            .add(ReminderKind::Timer, "", at(1_800_000_000))
+            .unwrap();
         store.remove(id);
         id
     };
     let mut store = SqliteReminders::open(&path).unwrap();
-    let second = store.add(ReminderKind::Timer, "", at(1_800_000_000));
+    let second = store
+        .add(ReminderKind::Timer, "", at(1_800_000_000))
+        .unwrap();
     assert_ne!(first, second);
 }

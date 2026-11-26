@@ -15,6 +15,7 @@ impl SqliteReminders {
     /// Open (or create) the database at `path` and its reminders table.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let db = Connection::open(path)?;
+        db.busy_timeout(Duration::from_secs(5))?;
         // AUTOINCREMENT so an id the user heard is never given to a new one.
         db.execute_batch(
             "CREATE TABLE IF NOT EXISTS reminders (
@@ -29,18 +30,18 @@ impl SqliteReminders {
 }
 
 impl Reminders for SqliteReminders {
-    fn add(&mut self, kind: ReminderKind, text: &str, due: SystemTime) -> i64 {
-        let result = self.db.execute(
-            "INSERT INTO reminders (kind, text, due_ms) VALUES (?1, ?2, ?3)",
-            params![kind_name(kind), text, millis(due)],
-        );
-        match result {
-            Ok(_) => self.db.last_insert_rowid(),
-            Err(err) => {
+    fn add(&mut self, kind: ReminderKind, text: &str, due: SystemTime) -> Result<i64, String> {
+        let due_ms = millis(due).ok_or("that time is out of range")?;
+        self.db
+            .execute(
+                "INSERT INTO reminders (kind, text, due_ms) VALUES (?1, ?2, ?3)",
+                params![kind_name(kind), text, due_ms],
+            )
+            .map_err(|err| {
                 log::error!("could not save a reminder: {err}");
-                -1
-            }
-        }
+                err.to_string()
+            })?;
+        Ok(self.db.last_insert_rowid())
     }
 
     fn pending(&mut self) -> Vec<Reminder> {
@@ -92,10 +93,12 @@ impl Reminders for SqliteReminders {
     }
 }
 
-fn millis(time: SystemTime) -> i64 {
-    time.duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+/// Milliseconds since the epoch, or None if that does not fit an i64.
+fn millis(time: SystemTime) -> Option<i64> {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_millis()).ok(),
+        Err(_) => Some(0),
+    }
 }
 
 fn kind_name(kind: ReminderKind) -> &'static str {

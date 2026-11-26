@@ -7,6 +7,7 @@ use jarvis_core::{App, Browser, BrowserKind, MediaKey, Volume};
 
 use crate::apps;
 use crate::browser;
+use crate::volume::target_level;
 
 fn output(program: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(program).args(args).output().ok()?;
@@ -75,10 +76,12 @@ pub fn open_app(app: &App) -> Result<String, String> {
     }
     let text = std::fs::read_to_string(&app.target).map_err(|e| fail(e.to_string()))?;
     let entry = apps::parse_desktop(&text).ok_or_else(|| fail("not a launchable app".into()))?;
-    let mut parts = entry.exec.split_whitespace();
-    let program = parts.next().ok_or_else(|| fail("no command".into()))?;
+    let words = apps::split_exec(&entry.exec);
+    let (program, rest) = words
+        .split_first()
+        .ok_or_else(|| fail("no command".into()))?;
     Command::new(program)
-        .args(parts)
+        .args(rest)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -118,7 +121,20 @@ pub fn volume(change: Volume) -> Result<String, String> {
                 vec!["set-sink-volume".into(), "@DEFAULT_SINK@".into(), p],
             )
         }
-        Volume::Up(n) => rel(sink, n, '+'),
+        Volume::Up(n) => {
+            // Never boost past 100%.
+            let (mut wp, mut pa) = rel(sink, n, '+');
+            wp.splice(1..1, ["-l".to_string(), "1.0".to_string()]);
+            if let Some(level) = pactl_level() {
+                let target = target_level(level, change).unwrap_or(100);
+                pa = vec![
+                    "set-sink-volume".into(),
+                    "@DEFAULT_SINK@".into(),
+                    format!("{target}%"),
+                ];
+            }
+            (wp, pa)
+        }
         Volume::Down(n) => rel(sink, n, '-'),
     };
     let w: Vec<&str> = wp.iter().map(String::as_str).collect();

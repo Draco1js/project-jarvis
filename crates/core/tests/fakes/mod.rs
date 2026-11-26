@@ -257,7 +257,7 @@ impl FakeReminders {
 }
 
 impl Reminders for FakeReminders {
-    fn add(&mut self, kind: ReminderKind, text: &str, due: SystemTime) -> i64 {
+    fn add(&mut self, kind: ReminderKind, text: &str, due: SystemTime) -> Result<i64, String> {
         let mut next = self.next_id.lock().unwrap();
         *next += 1;
         self.items.lock().unwrap().push(Reminder {
@@ -266,7 +266,7 @@ impl Reminders for FakeReminders {
             text: text.to_string(),
             due,
         });
-        *next
+        Ok(*next)
     }
 
     fn pending(&mut self) -> Vec<Reminder> {

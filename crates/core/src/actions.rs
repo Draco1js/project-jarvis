@@ -204,14 +204,14 @@ confirm it in a few words. web_search bangs for sites the user may name: {bangs}
     ) -> Outcome {
         let browser = actions.browser();
         let private = browser.kind.private_flag().is_some();
-        let result = done(actions.run(&Action::OpenUrl { url, private }));
-        if !private && self.told_no_private.insert(browser.name.clone()) {
+        let result = actions.run(&Action::OpenUrl { url, private });
+        if result.is_ok() && !private && self.told_no_private.insert(browser.name.clone()) {
             notices.push(format!(
                 "{} can't open private windows, so I used a normal one.",
                 browser.name
             ));
         }
-        result
+        done(result)
     }
 }
 

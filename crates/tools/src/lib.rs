@@ -64,7 +64,13 @@ impl SystemActions {
 
     fn open_url(&mut self, url: &str, private: bool) -> Result<String, String> {
         let (browser, exe) = self.resolve_browser();
-        if let (true, Some(flag), Some(exe)) = (private, browser.kind.private_flag(), &exe) {
+        if private {
+            let (Some(flag), Some(exe)) = (browser.kind.private_flag(), &exe) else {
+                return Err(format!(
+                    "private browsing is not available with {}",
+                    browser.name
+                ));
+            };
             spawn(exe, &[flag, url])
                 .map_err(|e| format!("could not start {}: {e}", browser.name))?;
             return Ok(String::new());
@@ -133,8 +139,16 @@ impl Actions for SystemActions {
             Action::OpenRecentFile(folder) => {
                 let dir = folder_path(*folder).ok_or("that folder does not exist here")?;
                 let file = files::newest_file(&dir).ok_or("there are no files in that folder")?;
-                open::that_detached(&file).map_err(|e| format!("could not open the file: {e}"))?;
                 let name = file.file_name().unwrap_or_default().to_string_lossy();
+                if files::is_runnable(&file) {
+                    // Never run a program on a voice command: show the folder.
+                    open::that_detached(&dir)
+                        .map_err(|e| format!("could not open the folder: {e}"))?;
+                    return Ok(format!(
+                        "{name} is a program, so I opened its folder instead of running it"
+                    ));
+                }
+                open::that_detached(&file).map_err(|e| format!("could not open the file: {e}"))?;
                 Ok(format!("opened {name}"))
             }
             Action::Volume(change) => platform::volume(*change),

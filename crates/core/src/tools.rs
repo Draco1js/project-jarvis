@@ -108,16 +108,19 @@ pub fn run(ports: &mut Ports, call: &ToolCall) -> String {
     let text = |key: &str| args[key].as_str().unwrap_or("").trim().to_string();
     let result = match call.name.as_str() {
         "set_timer" => match args["seconds"].as_u64().filter(|s| *s > 0) {
-            Some(seconds) => {
-                let due = ports.clock.now() + Duration::from_secs(seconds);
-                Ok(add(ports, ReminderKind::Timer, &text("label"), due))
+            Some(seconds) if seconds <= MAX_TIMER_SECONDS => {
+                match ports.clock.now().checked_add(Duration::from_secs(seconds)) {
+                    Some(due) => add(ports, ReminderKind::Timer, &text("label"), due),
+                    None => Err("that is too far in the future".to_string()),
+                }
             }
+            Some(_) => Err("a timer can be at most one year long".to_string()),
             None => Err("seconds must be a whole number above 0".to_string()),
         },
         "set_alarm" => future_time(ports, &text("at"))
-            .map(|due| add(ports, ReminderKind::Alarm, &text("label"), due)),
+            .and_then(|due| add(ports, ReminderKind::Alarm, &text("label"), due)),
         "set_reminder" => future_time(ports, &text("at"))
-            .map(|due| add(ports, ReminderKind::Reminder, &text("text"), due)),
+            .and_then(|due| add(ports, ReminderKind::Reminder, &text("text"), due)),
         "list_reminders" => Ok(list(ports)),
         "cancel_reminder" => match args["id"].as_i64() {
             Some(id) if ports.reminders.remove(id) => Ok(format!("Cancelled {id}.")),
@@ -138,13 +141,24 @@ pub fn run(ports: &mut Ports, call: &ToolCall) -> String {
     result.unwrap_or_else(|error| format!("Error: {error}."))
 }
 
-fn add(ports: &mut Ports, kind: ReminderKind, text: &str, due: SystemTime) -> String {
-    let id = ports.reminders.add(kind, text, due);
-    format!(
+/// The longest a timer may run.
+const MAX_TIMER_SECONDS: u64 = 365 * 24 * 60 * 60;
+
+fn add(
+    ports: &mut Ports,
+    kind: ReminderKind,
+    text: &str,
+    due: SystemTime,
+) -> Result<String, String> {
+    let id = ports
+        .reminders
+        .add(kind, text, due)
+        .map_err(|e| format!("could not save it: {e}"))?;
+    Ok(format!(
         "{} {id} set, going off at {}.",
         kind_name(kind),
         when(ports.clock.as_ref(), due)
-    )
+    ))
 }
 
 fn list(ports: &mut Ports) -> String {
@@ -235,11 +249,15 @@ pub fn fire_due_reminders(ports: &mut Ports, emit: &mut dyn FnMut(Output)) {
         if reminder.due > now {
             break;
         }
+        // Claim it first: if it cannot be removed it would be announced again
+        // on every tick, so skip it.
+        if !ports.reminders.remove(reminder.id) {
+            continue;
+        }
         let late = now.duration_since(reminder.due).unwrap_or_default() >= LATE_AFTER;
         let (title, body) = announcement(ports.clock.as_ref(), &reminder, late);
         ports.notifier.notify(title, &body);
-        ports.speaker.speak(&spoken(title, &reminder.text, late));
-        ports.reminders.remove(reminder.id);
+        ports.speaker.queue(&spoken(title, &reminder.text, late));
         emit(Output::ReminderDue {
             title: title.into(),
             body,

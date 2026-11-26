@@ -89,3 +89,19 @@ fn reg_query_output_yields_the_default_value() {
         Some("\"C:\\a b\\chrome.exe\" %1")
     );
 }
+
+#[test]
+fn reg_default_is_locale_independent() {
+    let out = "\r\nHKCR\\X\\command\r\n    (Standard)    REG_SZ    \"C:\\c\\chrome.exe\" %1\r\n";
+    assert_eq!(
+        jarvis_tools::browser::parse_reg_default(out).as_deref(),
+        Some("\"C:\\c\\chrome.exe\" %1")
+    );
+}
+
+#[test]
+fn path_setting_classified_by_file_name() {
+    let (b, exe) = jarvis_tools::browser::from_setting("/opt/ledger-tools/firefox");
+    assert_eq!(b.kind, jarvis_core::BrowserKind::Firefox);
+    assert!(exe.is_some());
+}

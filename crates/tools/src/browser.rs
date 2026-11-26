@@ -51,10 +51,13 @@ pub fn kind_from_desktop_id(id: &str) -> BrowserKind {
 pub fn from_setting(setting: &str) -> (Browser, Option<String>) {
     let setting = setting.trim();
     let is_path = setting.contains('/') || setting.contains('\\');
-    let kind = kind_from_text(setting);
+    let base = setting.rsplit(['/', '\\']).next().unwrap_or(setting);
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+    // For a path only the file name counts: a directory like `ledger-tools`
+    // must not make Firefox look like Edge.
+    let kind = kind_from_text(if is_path { base } else { setting });
     let name = if kind == BrowserKind::Other {
-        let base = setting.rsplit(['/', '\\']).next().unwrap_or(setting);
-        base.trim_end_matches(".exe").to_string()
+        base.to_string()
     } else {
         display_name(kind).to_string()
     };
@@ -93,6 +96,19 @@ pub fn parse_reg_value(output: &str, value_name: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The data of a key's default value in `reg query ... /ve` output. The value
+/// name is localized ("(Default)", "(Standard)", ...), so take the last
+/// `REG_SZ`/`REG_EXPAND_SZ` line instead of matching the name.
+pub fn parse_reg_default(output: &str) -> Option<String> {
+    output.lines().rev().find_map(|line| {
+        ["REG_EXPAND_SZ", "REG_SZ"].iter().find_map(|ty| {
+            let (_, data) = line.split_once(&format!("    {ty}    "))?;
+            let data = data.trim();
+            (!data.is_empty()).then(|| data.to_string())
+        })
+    })
 }
 
 /// Usual executable names for a browser, to look up on PATH.

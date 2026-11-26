@@ -13,6 +13,7 @@ use jarvis_core::Speaker;
 
 enum Command {
     Speak(String),
+    Queue(String),
     Stop,
 }
 
@@ -43,6 +44,7 @@ impl OsVoice {
                 for command in inbox {
                     let result = match command {
                         Command::Speak(text) => tts.speak(text, true).map(|_| ()),
+                        Command::Queue(text) => tts.speak(text, false).map(|_| ()),
                         Command::Stop => tts.stop().map(|_| ()),
                     };
                     if let Err(err) = result {
@@ -66,5 +68,9 @@ impl OsVoice {
 impl Speaker for OsVoice {
     fn speak(&mut self, text: &str) {
         let _ = self.commands.send(Command::Speak(text.to_string()));
+    }
+
+    fn queue(&mut self, text: &str) {
+        let _ = self.commands.send(Command::Queue(text.to_string()));
     }
 }

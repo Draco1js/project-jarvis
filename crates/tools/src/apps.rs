@@ -46,6 +46,46 @@ pub fn parse_desktop(text: &str) -> Option<DesktopEntry> {
 }
 
 /// Remove `%f %u %U ...` field codes (and turn `%%` into `%`).
+/// Split a desktop `Exec` line into words, honouring double and single quotes
+/// and backslash escapes (a quoted path may contain spaces).
+pub fn split_exec(exec: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = exec.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    words.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                started = true;
+            }
+            (Some(q), c) if c == q => quote = None,
+            (Some('\''), c) => cur.push(c),
+            (_, '\\') => {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+                started = true;
+            }
+            (_, c) => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(cur);
+    }
+    words
+}
+
 pub fn strip_field_codes(exec: &str) -> String {
     let mut out = String::new();
     let mut chars = exec.trim().chars().peekable();
