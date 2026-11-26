@@ -5,3 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+jarvis-core = { version = "0.1.0", path = "../core" }
+log = "0.4.35"
+tts = "0.26.3"

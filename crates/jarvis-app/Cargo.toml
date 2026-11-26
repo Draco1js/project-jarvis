@@ -11,4 +11,11 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 gpui-kit.workspace = true
+log = "0.4.35"
 tray-icon = { version = "0.27", default-features = false, features = ["ksni"] }
+jarvis-core = { path = "../core" }
+jarvis-llm = { path = "../llm" }
+jarvis-store = { path = "../store" }
+jarvis-tools = { path = "../tools" }
+jarvis-tts = { path = "../tts" }
+notify-rust = "4.19.0"

@@ -46,7 +46,14 @@ Platform priority for building and testing: **Windows → macOS → Wayland → 
 ## Voice pipeline
 
 1. **Wake word:** an RMS energy gate passes audio to the detector only when there is sound. The detector sits behind a `WakeDetector` trait with two engines:
-   - **Built-in "Hey Jarvis" (default):** openWakeWord's pretrained `hey_jarvis` model (a few MB of ONNX, trained on many synthetic voices, so it works for any speaker). It runs in the pure-Rust `tract` crate if that loads the models correctly; otherwise in `ort` (ONNX Runtime).
+   - **Built-in "Hey Jarvis" (default):** openWakeWord's pretrained `hey_jarvis` model (a few MB of ONNX, trained on many synthetic voices, so it works for any speaker). It runs in the pure-Rust `tract` crate, so **no ONNX Runtime library ships**.
+   - **Runtime decision (issue #3, checked 2026-11-26 on Linux x86_64):** `tract-onnx` `=0.23.10` loads all three openWakeWord models (`melspectrogram.onnx`, `embedding_model.onnx`, `hey_jarvis_v0.1.onnx` from the v0.5.1 release; the classifier's `If` op is fine). A Rust port of openWakeWord 0.6.0's streaming path gives the same per-frame scores as the Python reference (ONNX Runtime 1.32) on 22 clips (8 "Hey Jarvis" from 4 Piper voices, 12 other phrases, noise, silence): worst difference 2.6e-6. Positives score 0.995–0.999, other speech ≤ 0.004, white noise 0.18. Cost: about 2.8 ms per 80 ms frame (≈3.5 % of one core) before the energy gate. Because `tract` matched, `ort` was not tried and its library size was not measured. The spike is in `spikes/oww-runtime/`.
+     - Pin `tract-onnx` exactly: its API changes between minor versions (0.23 returns plans as `Arc`, and uses `to_plain_array_view`).
+     - Port details the `wake` crate must keep: feed 1280-sample chunks; run the mel model on the last 1760 samples (chunk + 480), then `x / 10 + 2`; start the mel buffer as 76 rows of ones; embed the last 76 mel rows; classify the last 16 embeddings; report 0 for the first 5 frames. The mel model ends in a ReduceMax over its input, so the input length changes the output: keep the exact 1760-sample slice. Compile one plan per input shape (the mel model has a dynamic length).
+     - openWakeWord fills its starting embedding buffer from random noise. We use 4 s of silence instead, which only affects the first 1.28 s of a stream.
+     - The stripped spike binary is 24 MB on Linux. Most of that is probably `tract`; check the real cost when the `wake` crate lands.
+     - `tract-linalg` compiles assembly kernels in its build script, so `cargo check` from Linux for Windows or macOS fails (no `lib.exe` or Apple toolchain). Build and run the scores test on real Windows and macOS machines or CI runners before Milestone 1.
+     - Kokoro (later) runs in `tract` too if it loads; otherwise that question is reopened for Kokoro alone.
    - **Custom or personal wake words (optional):** Rustpotter, trained on the device from 3–5 recordings of the user. Offered in setup and settings.
    - **Rustpotter status (checked 2026-11-26):** 3.0.2 is the latest release, and the repo has had no commits since 2023-10-01. It does not compile with current dependencies: its `candle-core` 0.2.2 breaks with newer `half`. With `half` pinned to `=2.3.1` it builds and runs on Linux and passes `cargo check` for Windows (`x86_64-pc-windows-msvc`) and macOS (`aarch64-apple-darwin`). If the pin starts clashing with other dependencies, fork Rustpotter to update `candle`, or drop custom words.
    - Plain "Jarvis" (without "Hey") as the built-in word would need our own openWakeWord model trained through its synthetic-speech pipeline. Not planned for now.
@@ -117,7 +124,7 @@ Not doing: Wi-Fi/Bluetooth toggles, window control, screenshots, lock/sleep/brig
 
 ## Secrets, data and privacy
 
-- Groq and Gemini keys entered in the app, stored in the OS keyring (`keyring` crate). Env var `JARVIS_GROQ_API_KEY` as a dev fallback.
+- Groq and Gemini keys entered in the app, stored in the OS keyring (`keyring` crate). Env vars `JARVIS_GROQ_API_KEY` and `JARVIS_GEMINI_API_KEY` as dev fallbacks (the Gemini env var is the only source until setup lands, #9).
 - All app data in **one per-OS data folder**: settings, SQLite, models, llama-server, Kokoro, logs.
 - No telemetry. Local logs rotate (5 × 5 MB) with keys redacted; "show logs" button in settings.
 
