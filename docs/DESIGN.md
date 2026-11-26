@@ -165,6 +165,7 @@ GitHub Actions builds and tests on Windows, macOS and Linux for every push; tags
 
 ## Milestones
 
+0. **Do first:** check whether `tract` can run openWakeWord or we need `ort`, which decides whether ONNX Runtime ships natively. Then the wake-word bake-off (issue #2). Then confirm the non-focusing panel on a real Windows machine.
 1. **Windows MVP:** tray, built-in "Hey Jarvis" wake word, hotkey, VAD, Groq, Gemini, OS voice, search with bangs in a private window, open app/URL, volume, panel.
 2. Then: local model fallback, dictation, timers, notes, memory, weather, Kokoro, wake-word training, installer and updater, then macOS, Wayland and X11.
 
