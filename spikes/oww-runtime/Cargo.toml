@@ -1,0 +1,14 @@
+[package]
+name = "oww-runtime-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Throwaway spike (issue #3): can tract run openWakeWord, or do we need ort?"
+
+# Kept out of the main workspace on purpose: this is throwaway code.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+hound = "3.5"
+tract-onnx = "=0.23.10"
