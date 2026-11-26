@@ -117,7 +117,7 @@ Not doing: Wi-Fi/Bluetooth toggles, window control, screenshots, lock/sleep/brig
 
 ## Secrets, data and privacy
 
-- Groq and Gemini keys entered in the app, stored in the OS keyring (`keyring` crate). Env var `JARVIS_GROQ_API_KEY` as a dev fallback.
+- Groq and Gemini keys entered in the app, stored in the OS keyring (`keyring` crate). Env vars `JARVIS_GROQ_API_KEY` and `JARVIS_GEMINI_API_KEY` as dev fallbacks (the Gemini env var is the only source until setup lands, #9).
 - All app data in **one per-OS data folder**: settings, SQLite, models, llama-server, Kokoro, logs.
 - No telemetry. Local logs rotate (5 × 5 MB) with keys redacted; "show logs" button in settings.
 
