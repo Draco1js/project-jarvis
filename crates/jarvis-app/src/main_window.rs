@@ -19,6 +19,8 @@ pub enum Line {
     You(String),
     Jarvis(String),
     Problem(String),
+    /// A timer, alarm or reminder that went off.
+    Reminder(String),
 }
 
 /// What the main window shows. Updated from the assistant's outputs.
@@ -41,6 +43,14 @@ impl Conversation {
             Output::Problem(text) => {
                 self.thinking = false;
                 self.lines.push(Line::Problem(text));
+            }
+            Output::ReminderDue { title, body, .. } => {
+                let text = if body.is_empty() {
+                    title
+                } else {
+                    format!("{title}: {body}")
+                };
+                self.lines.push(Line::Reminder(text));
             }
         }
     }
@@ -99,6 +109,7 @@ impl Render for MainWindow {
                 Line::You(text) => Label::new(format!("You: {text}")),
                 Line::Jarvis(text) => Label::new(format!("Jarvis: {text}")),
                 Line::Problem(text) => Label::new(format!("⚠ {text}")),
+                Line::Reminder(text) => Label::new(format!("⏰ {text}")),
             });
         }
         if conversation.thinking {
