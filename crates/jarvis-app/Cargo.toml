@@ -17,3 +17,5 @@ jarvis-core = { path = "../core" }
 jarvis-llm = { path = "../llm" }
 jarvis-store = { path = "../store" }
 jarvis-tts = { path = "../tts" }
+notify-rust = "4.19.0"
+jarvis-tools = { path = "../tools" }

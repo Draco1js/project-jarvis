@@ -7,6 +7,10 @@
 
 mod assistant;
 pub mod ports;
+mod tools;
 
 pub use assistant::{Assistant, Input, Output};
-pub use ports::{ChatError, ChatProvider, Clock, Message, Ports, Role, Speaker, Store};
+pub use ports::{
+    ChatError, ChatProvider, Clock, Message, Notifier, Ports, Reminder, ReminderKind, Reminders,
+    Reply, Role, Speaker, Store, ToolCall, ToolSpec, Weather,
+};
