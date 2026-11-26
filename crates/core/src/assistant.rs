@@ -3,14 +3,15 @@
 use std::time::{Duration, SystemTime};
 
 use crate::memory;
-use crate::ports::{ChatError, ChatReply, Message, Ports, Role};
+use crate::ports::{ChatError, Message, Ports, Reply, Role};
 use crate::tools;
 
 /// Idle time after which the next question starts a new conversation.
 pub const CONVERSATION_IDLE_RESET: Duration = Duration::from_secs(5 * 60);
 
-/// Most model requests for one question (each tool round is one more).
-const MAX_TOOL_ROUNDS: usize = 4;
+/// How many times one question may go back to the model with tool results
+/// before Jarvis gives up on it.
+const MAX_TOOL_ROUNDS: usize = 5;
 
 /// Said after a note is saved.
 const NOTED: &str = "Noted.";
@@ -27,8 +28,9 @@ Never say \"Jarvis\" in a reply, not even when the user calls you that.";
 pub enum Input {
     /// The user typed a question and pressed Enter.
     Typed(String),
-    /// Sent by the app every few seconds, so an idle conversation ends (and
-    /// is summarised) without waiting for the next question.
+    /// Time passed. The app sends this at start and about once a second, so
+    /// timers, alarms and reminders go off (late ones too, after a restart)
+    /// and an idle conversation ends (and is summarised) on time.
     Tick,
     /// Delete saved conversation history (notes are kept) and start afresh.
     ClearHistory,
@@ -47,6 +49,13 @@ pub enum Output {
     Reply(String),
     /// No answer this time; a short explanation for the user.
     Problem(String),
+    /// A timer, alarm or reminder went off (also notified and spoken).
+    /// `late` means it was missed, e.g. while Jarvis was not running.
+    ReminderDue {
+        title: String,
+        body: String,
+        late: bool,
+    },
 }
 
 pub struct Assistant {
@@ -68,7 +77,10 @@ impl Assistant {
     pub fn handle(&mut self, input: Input, emit: &mut dyn FnMut(Output)) {
         match input {
             Input::Typed(text) => self.answer(text, emit),
-            Input::Tick => self.reset_if_idle(emit),
+            Input::Tick => {
+                self.reset_if_idle(emit);
+                tools::fire_due_reminders(&mut self.ports, emit);
+            }
             Input::ClearHistory => {
                 self.ports.store.clear_history();
                 self.history.clear();
@@ -84,19 +96,21 @@ impl Assistant {
         let question = Message::new(Role::User, text);
         emit(Output::Thinking);
 
-        let mut request = Vec::with_capacity(self.history.len() + 2);
-        request.push(Message::new(Role::System, SYSTEM_PROMPT));
-        request.extend(self.history.iter().cloned());
-        request.push(question.clone());
-
-        let outcome = match memory::note_text(&question.content) {
-            Some(note) => self.save_note(note),
-            None => self.chat_running_tools(request),
+        let mut turn = vec![question];
+        let outcome = match memory::note_text(&turn[0].content) {
+            Some(note) => {
+                let note = note.to_string();
+                self.save_note(&note)
+            }
+            None => self.ask(&mut turn),
         };
+
         match outcome {
             Ok(reply) => {
                 let reply = Message::new(Role::Assistant, reply);
-                self.remember(question);
+                for message in turn {
+                    self.remember(message);
+                }
                 self.remember(reply.clone());
                 self.ports.speaker.speak(&reply.content);
                 emit(Output::Reply(reply.content));
@@ -104,6 +118,37 @@ impl Assistant {
             Err(problem) => emit(Output::Problem(problem)),
         }
         self.last_activity = Some(self.ports.clock.now());
+    }
+
+    /// Ask the model, running the tools it calls, until it answers in text.
+    /// The tool calls and results are added to `turn`.
+    fn ask(&mut self, turn: &mut Vec<Message>) -> Result<String, String> {
+        let specs = tools::specs();
+        loop {
+            if turn.len() > 2 * MAX_TOOL_ROUNDS {
+                return Err("Gave up after too many tool calls.".to_string());
+            }
+            let mut request = Vec::with_capacity(self.history.len() + turn.len() + 1);
+            request.push(Message::new(Role::System, self.system_prompt()));
+            request.extend(self.history.iter().cloned());
+            request.extend(turn.iter().cloned());
+
+            match self.ports.chat.chat(&request, &specs) {
+                Ok(Reply::Text(reply)) => return Ok(reply),
+                Ok(Reply::ToolCalls(calls)) => {
+                    let results: Vec<Message> = calls
+                        .iter()
+                        .map(|call| {
+                            let result = tools::run(&mut self.ports, call);
+                            Message::tool_result(call.id.clone(), result)
+                        })
+                        .collect();
+                    turn.push(Message::tool_calls(calls));
+                    turn.extend(results);
+                }
+                Err(error) => return Err(describe(&error)),
+            }
+        }
     }
 
     /// Save a note with model-written tags; the confirmation is the reply.
@@ -117,32 +162,22 @@ impl Assistant {
             .map_err(|reason| format!("Couldn't save the note: {reason}"))
     }
 
-    /// Ask the model, running any tools it calls, until it answers in text.
-    /// Tool calls and results live only in this request, not in the history.
-    fn chat_running_tools(&mut self, mut request: Vec<Message>) -> Result<String, String> {
-        for _ in 0..MAX_TOOL_ROUNDS {
-            let reply = self
-                .ports
-                .chat
-                .chat_with_tools(&request, tools::SPECS)
-                .map_err(|error| describe(&error))?;
-            let calls = match reply {
-                ChatReply::Text(text) => return Ok(text),
-                ChatReply::ToolCalls(calls) => calls,
-            };
-            let results: Vec<Message> = calls
-                .iter()
-                .map(|call| Message::tool_result(call, tools::run(call, &mut self.ports)))
-                .collect();
-            request.push(Message::tool_request(calls));
-            request.extend(results);
-        }
-        Err("The model kept calling tools without answering.".into())
+    /// The fixed prompt plus the current local time, which the model needs
+    /// for dates, alarms and reminders.
+    fn system_prompt(&self) -> String {
+        format!(
+            "{SYSTEM_PROMPT} {}",
+            tools::prompt_context(self.ports.clock.as_ref())
+        )
     }
 
+    /// Keep a message in the conversation. Only what was said is saved to
+    /// history; tool calls and results stay in memory.
     fn remember(&mut self, message: Message) {
-        let now = self.ports.clock.now();
-        self.ports.store.save_message(now, &message);
+        if matches!(message.role, Role::User | Role::Assistant) && message.tool_calls.is_empty() {
+            let now = self.ports.clock.now();
+            self.ports.store.save_message(now, &message);
+        }
         self.history.push(message);
     }
 

@@ -1,6 +1,14 @@
-//! Conversation summaries and tags, written by the model.
+//! Memory: conversation summaries and tags written by the model, notes, and
+//! the `search_memory` tool.
 
-use crate::ports::{ChatProvider, Message, Role, Tagged};
+use std::time::SystemTime;
+
+use chrono::{DateTime, FixedOffset, Utc};
+use serde_json::json;
+
+use crate::ports::{
+    ChatProvider, MemoryHit, MemoryKind, Message, Ports, Reply, Role, Tagged, ToolSpec,
+};
 
 /// Most tags kept for one conversation or note.
 pub const MAX_TAGS: usize = 10;
@@ -54,9 +62,9 @@ pub fn summarize(chat: &mut dyn ChatProvider, text: &str) -> Tagged {
         Message::new(Role::System, SUMMARY_PROMPT),
         Message::new(Role::User, text),
     ];
-    match chat.chat(&request) {
-        Ok(reply) => parse(&reply),
-        Err(_) => Tagged::default(),
+    match chat.chat(&request, &[]) {
+        Ok(Reply::Text(reply)) => parse(&reply),
+        Ok(Reply::ToolCalls(_)) | Err(_) => Tagged::default(),
     }
 }
 
@@ -87,4 +95,66 @@ fn strip_label<'a>(line: &'a str, label: &str) -> Option<&'a str> {
     let head = line.get(..label.len())?;
     head.eq_ignore_ascii_case(label)
         .then(|| line[label.len()..].trim_start_matches('*').trim())
+}
+
+/// Most memory search results handed to the model.
+pub const SEARCH_LIMIT: usize = 5;
+
+pub fn search_spec() -> ToolSpec {
+    ToolSpec {
+        name: "search_memory",
+        description: "Search past conversations and the user's notes. Use it when the user \
+refers to something said or noted before. Returns dated summaries, tags and excerpts.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Keywords to look for, e.g. names, topics or places."},
+            },
+            "required": ["query"],
+        }),
+    }
+}
+
+/// Run `search_memory`; the result goes back to the model as text.
+pub fn search(ports: &mut Ports, query: &str) -> Result<String, String> {
+    if query.is_empty() {
+        return Err("search_memory needs a \"query\" string".into());
+    }
+    let hits = ports.store.search(query, SEARCH_LIMIT);
+    if hits.is_empty() {
+        return Ok(format!("Nothing found in memory for \"{query}\"."));
+    }
+    let offset = FixedOffset::east_opt(ports.clock.utc_offset_secs())
+        .unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero offset"));
+    let mut text = format!("Found {} result(s) for \"{query}\":", hits.len());
+    for (i, hit) in hits.iter().enumerate() {
+        text.push_str(&describe_hit(i + 1, hit, offset));
+    }
+    Ok(text)
+}
+
+fn describe_hit(n: usize, hit: &MemoryHit, offset: FixedOffset) -> String {
+    let kind = match hit.kind {
+        MemoryKind::Conversation => "Conversation",
+        MemoryKind::Note => "Note",
+    };
+    let mut text = format!("\n{n}. {kind} on {}.", date(hit.at, offset));
+    if !hit.summary.is_empty() {
+        text.push_str(&format!(" Summary: {}", hit.summary));
+    }
+    if !hit.tags.is_empty() {
+        text.push_str(&format!(" Tags: {}.", hit.tags.join(", ")));
+    }
+    if !hit.excerpt.is_empty() {
+        text.push_str(&format!(" Excerpt: {}", hit.excerpt));
+    }
+    text
+}
+
+/// `YYYY-MM-DD` in the user's time zone.
+fn date(at: SystemTime, offset: FixedOffset) -> String {
+    DateTime::<Utc>::from(at)
+        .with_timezone(&offset)
+        .format("%Y-%m-%d")
+        .to_string()
 }

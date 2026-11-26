@@ -12,9 +12,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use jarvis_core::{MemoryHit, MemoryKind, Message, Role, Store, Tagged};
 use rusqlite::{Connection, OptionalExtension, params};
 
-/// The database file inside the data folder.
-pub const DATABASE_FILE_NAME: &str = "jarvis.sqlite3";
-
 /// The default notes folder: `Documents/Jarvis Notes`.
 pub fn default_notes_dir() -> Option<PathBuf> {
     dirs::document_dir().map(|dir| dir.join("Jarvis Notes"))
@@ -77,6 +74,9 @@ impl SqliteStore {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
         let db = Connection::open(db_path).map_err(|e| e.to_string())?;
+        // Reminders use the same file through their own connection.
+        db.busy_timeout(Duration::from_secs(5))
+            .map_err(|e| e.to_string())?;
         let mut store = Self {
             db,
             notes_dir,
@@ -265,7 +265,10 @@ impl SqliteStore {
         tx.commit()?;
         self.current = None;
         // Reclaim the space so deleted text does not linger in the file.
-        self.db.execute_batch("VACUUM")
+        if let Err(e) = self.db.execute_batch("VACUUM") {
+            log::warn!("history cleared, but the database could not be compacted: {e}");
+        }
+        Ok(())
     }
 
     fn try_search(&mut self, query: &str, limit: usize) -> rusqlite::Result<Vec<MemoryHit>> {

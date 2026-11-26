@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use jarvis_core::{ChatError, ChatProvider, ChatReply, Message, Role, ToolCall, ToolSpec};
+use jarvis_core::{ChatError, ChatProvider, Message, Reply, Role, ToolCall, ToolSpec};
 use jarvis_llm::{OpenAiChat, gemini_key};
 use mockito::Matcher;
 use serde_json::json;
@@ -59,14 +59,14 @@ fn sends_the_conversation_and_returns_the_reply() {
         )
         .create();
 
-    let reply = client(&server).chat(&conversation());
+    let reply = client(&server).chat(&conversation(), &[]);
 
     mock.assert();
-    assert_eq!(reply, Ok("Four.".to_string()));
+    assert_eq!(reply, Ok(Reply::Text("Four.".to_string())));
 }
 
 /// Serve one canned response to the chat endpoint and return what the client made of it.
-fn reply_to(status: usize, headers: &[(&str, &str)], body: &str) -> Result<String, ChatError> {
+fn reply_to(status: usize, headers: &[(&str, &str)], body: &str) -> Result<Reply, ChatError> {
     let mut server = mockito::Server::new();
     let mut mock = server
         .mock("POST", "/v1beta/openai/chat/completions")
@@ -77,7 +77,7 @@ fn reply_to(status: usize, headers: &[(&str, &str)], body: &str) -> Result<Strin
         mock = mock.with_header(*name, value);
     }
     let _mock = mock.create();
-    client(&server).chat(&conversation())
+    client(&server).chat(&conversation(), &[])
 }
 
 #[test]
@@ -172,7 +172,7 @@ fn slow_answer_times_out() {
 
     let reply = client(&server)
         .with_timeout(Duration::from_millis(300))
-        .chat(&conversation());
+        .chat(&conversation(), &[]);
 
     assert_eq!(reply, Err(ChatError::Timeout));
 }
@@ -188,7 +188,7 @@ fn closed_port_is_unreachable() {
         Some("test-key".into()),
         "gemini-3.5-flash-lite",
     );
-    assert_eq!(chat.chat(&conversation()), Err(ChatError::Unreachable));
+    assert_eq!(chat.chat(&conversation(), &[]), Err(ChatError::Unreachable));
 }
 
 #[test]
@@ -197,7 +197,7 @@ fn missing_key_sends_nothing() {
     let mock = server.mock("POST", Matcher::Any).expect(0).create();
     let mut chat = OpenAiChat::new(&server.url(), None, "gemini-3.5-flash-lite");
 
-    assert_eq!(chat.chat(&conversation()), Err(ChatError::MissingKey));
+    assert_eq!(chat.chat(&conversation(), &[]), Err(ChatError::MissingKey));
     mock.assert();
 }
 
@@ -220,18 +220,28 @@ fn gemini_defaults() {
     assert_eq!(jarvis_llm::DEFAULT_GEMINI_MODEL, "gemini-3.5-flash-lite");
 }
 
-const SEARCH: ToolSpec = ToolSpec {
-    name: "search_memory",
-    description: "Search memory.",
-    parameters: r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"#,
-};
+fn timer_tool() -> ToolSpec {
+    ToolSpec {
+        name: "set_timer",
+        description: "Start a countdown timer.",
+        parameters: json!({
+            "type": "object",
+            "properties": {"seconds": {"type": "integer"}},
+            "required": ["seconds"],
+        }),
+    }
+}
 
 fn completion(message: serde_json::Value) -> String {
-    json!({"choices": [{"index": 0, "finish_reason": "stop", "message": message}]}).to_string()
+    json!({
+        "object": "chat.completion",
+        "choices": [{"index": 0, "finish_reason": "tool_calls", "message": message}],
+    })
+    .to_string()
 }
 
 #[test]
-fn offers_tools_and_returns_the_calls_the_model_makes() {
+fn tools_are_offered_as_functions_and_a_tool_call_comes_back_with_its_signature() {
     let mut server = mockito::Server::new();
     let mock = server
         .mock("POST", "/v1beta/openai/chat/completions")
@@ -239,9 +249,13 @@ fn offers_tools_and_returns_the_calls_the_model_makes() {
             "tools": [{
                 "type": "function",
                 "function": {
-                    "name": "search_memory",
-                    "description": "Search memory.",
-                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+                    "name": "set_timer",
+                    "description": "Start a countdown timer.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"seconds": {"type": "integer"}},
+                        "required": ["seconds"],
+                    },
                 },
             }],
         })))
@@ -252,80 +266,91 @@ fn offers_tools_and_returns_the_calls_the_model_makes() {
             "tool_calls": [{
                 "id": "call_1",
                 "type": "function",
-                "function": {"name": "search_memory", "arguments": "{\"query\":\"Pune\"}"},
-                "extra_content": {"google": {"thought_signature": "sig"}},
+                "function": {"name": "set_timer", "arguments": "{\"seconds\":300}"},
+                "extra_content": {"google": {"thought_signature": "sig-A"}},
             }],
         })))
         .create();
 
-    let reply = client(&server).chat_with_tools(&conversation(), &[SEARCH]);
+    let reply = client(&server).chat(&conversation(), &[timer_tool()]);
 
     mock.assert();
+    let Ok(Reply::ToolCalls(calls)) = reply else {
+        panic!("expected tool calls, got {reply:?}");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call_1");
+    assert_eq!(calls[0].name, "set_timer");
+    assert_eq!(calls[0].arguments, "{\"seconds\":300}");
+    let data: serde_json::Value =
+        serde_json::from_str(calls[0].provider_data.as_deref().unwrap()).unwrap();
     assert_eq!(
-        reply,
-        Ok(ChatReply::ToolCalls(vec![ToolCall {
-            id: "call_1".into(),
-            name: "search_memory".into(),
-            arguments: r#"{"query":"Pune"}"#.into(),
-            extra: Some(r#"{"google":{"thought_signature":"sig"}}"#.into()),
-        }]))
+        data,
+        json!({"extra_content": {"google": {"thought_signature": "sig-A"}}})
     );
 }
 
 #[test]
-fn tool_calls_and_results_go_back_on_the_wire() {
-    let call = ToolCall {
-        id: "call_1".into(),
-        name: "search_memory".into(),
-        arguments: r#"{"query":"Pune"}"#.into(),
-        extra: Some(r#"{"google":{"thought_signature":"sig"}}"#.into()),
-    };
-    let mut messages = conversation();
-    messages.push(Message::tool_request(vec![call.clone()]));
-    messages.push(Message::tool_result(&call, "Nothing found."));
+fn no_tools_key_is_sent_when_none_are_offered() {
+    let mut server = mockito::Server::new();
+    let with_tools = server
+        .mock("POST", "/v1beta/openai/chat/completions")
+        .match_body(Matcher::Regex("\"tools\"".into()))
+        .expect(0)
+        .create();
+    let _any = server
+        .mock("POST", "/v1beta/openai/chat/completions")
+        .with_status(200)
+        .with_body(completion(json!({"role": "assistant", "content": "Hi."})))
+        .create();
 
+    let reply = client(&server).chat(&conversation(), &[]);
+
+    with_tools.assert();
+    assert_eq!(reply, Ok(Reply::Text("Hi.".into())));
+}
+
+#[test]
+fn tool_calls_and_results_are_sent_back_with_the_signature_unchanged() {
     let mut server = mockito::Server::new();
     let mock = server
         .mock("POST", "/v1beta/openai/chat/completions")
         .match_body(Matcher::PartialJson(json!({
             "messages": [
-                {"role": "system"}, {"role": "user"}, {"role": "assistant"}, {"role": "user"},
+                {"role": "user", "content": "Five minute timer"},
                 {
                     "role": "assistant",
                     "tool_calls": [{
                         "id": "call_1",
                         "type": "function",
-                        "function": {"name": "search_memory", "arguments": "{\"query\":\"Pune\"}"},
-                        "extra_content": {"google": {"thought_signature": "sig"}},
+                        "function": {"name": "set_timer", "arguments": "{\"seconds\":300}"},
+                        "extra_content": {"google": {"thought_signature": "sig-A"}},
                     }],
                 },
-                {"role": "tool", "tool_call_id": "call_1", "content": "Nothing found."},
+                {"role": "tool", "tool_call_id": "call_1", "content": "Timer 1 set."},
             ],
         })))
         .with_status(200)
         .with_body(completion(
-            json!({"role": "assistant", "content": "I don't recall."}),
+            json!({"role": "assistant", "content": "Timer set."}),
         ))
         .create();
+    let call = ToolCall {
+        id: "call_1".into(),
+        name: "set_timer".into(),
+        arguments: "{\"seconds\":300}".into(),
+        provider_data: Some(
+            json!({"extra_content": {"google": {"thought_signature": "sig-A"}}}).to_string(),
+        ),
+    };
+    let messages = vec![
+        Message::new(Role::User, "Five minute timer"),
+        Message::tool_calls(vec![call]),
+        Message::tool_result("call_1", "Timer 1 set."),
+    ];
 
-    let reply = client(&server).chat_with_tools(&messages, &[SEARCH]);
+    let reply = client(&server).chat(&messages, &[timer_tool()]);
 
     mock.assert();
-    assert_eq!(reply, Ok(ChatReply::Text("I don't recall.".into())));
-}
-
-#[test]
-fn plain_chat_offers_no_tools() {
-    let mut server = mockito::Server::new();
-    let mock = server
-        .mock("POST", "/v1beta/openai/chat/completions")
-        .match_request(|request| {
-            !String::from_utf8_lossy(request.body().unwrap()).contains("\"tools\"")
-        })
-        .with_status(200)
-        .with_body(completion(json!({"role": "assistant", "content": "Four."})))
-        .create();
-
-    assert_eq!(client(&server).chat(&conversation()), Ok("Four.".into()));
-    mock.assert();
+    assert_eq!(reply, Ok(Reply::Text("Timer set.".into())));
 }

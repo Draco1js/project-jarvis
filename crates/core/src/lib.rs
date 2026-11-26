@@ -12,6 +12,6 @@ mod tools;
 
 pub use assistant::{Assistant, Input, Output};
 pub use ports::{
-    ChatError, ChatProvider, ChatReply, Clock, MemoryHit, MemoryKind, Message, Ports, Role,
-    Speaker, Store, Tagged, ToolCall, ToolSpec,
+    ChatError, ChatProvider, Clock, MemoryHit, MemoryKind, Message, Notifier, Ports, Reminder,
+    ReminderKind, Reminders, Reply, Role, Speaker, Store, Tagged, ToolCall, ToolSpec, Weather,
 };

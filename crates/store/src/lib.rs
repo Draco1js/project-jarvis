@@ -1,10 +1,12 @@
 //! Settings, SQLite history and memory (FTS5), keyring secrets, migrations, purge.
 //!
-//! So far: the data folder location, rotating redacted log files, and
-//! conversation history, notes and memory search in [`memory`].
+//! So far: the data folder location, rotating redacted log files,
+//! timers/alarms/reminders, and conversation history, notes and memory
+//! search ([`memory`]), all in one SQLite database.
 
 pub mod logs;
 pub mod memory;
+pub mod reminders;
 
 use std::path::PathBuf;
 
@@ -18,7 +20,7 @@ pub fn logs_dir() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join("logs"))
 }
 
-/// The SQLite database holding history and the memory index.
+/// The SQLite database file (reminders, history and the memory index).
 pub fn database_path() -> Option<PathBuf> {
-    data_dir().map(|dir| dir.join(memory::DATABASE_FILE_NAME))
+    data_dir().map(|dir| dir.join("jarvis.db"))
 }
