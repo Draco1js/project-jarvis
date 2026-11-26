@@ -21,7 +21,7 @@ Platform priority for building and testing: **Windows → macOS → Wayland → 
 | `jarvis-app` | GPUI windows, tray, panel, setup wizard. Binary `jarvis`. |
 | `core` | Headless assistant engine: turn state machine, conversation context, provider fallback, barge-in, summaries. Talks to every outside service through port traits so it can be tested with fakes (the main test seam). |
 | `audio` | Mic capture (`cpal`), voice activity detection (`earshot`). |
-| `wake` | Energy gate + Rustpotter. |
+| `wake` | Energy gate + `WakeDetector` trait: openWakeWord for the built-in "Hey Jarvis", Rustpotter for custom and personal wake words. |
 | `stt` | Groq transcription client. |
 | `llm` | Gemini and llama-server clients (one OpenAI-compatible client), fallback logic. |
 | `tools` | Assistant actions. |
@@ -45,9 +45,12 @@ Platform priority for building and testing: **Windows → macOS → Wayland → 
 
 ## Voice pipeline
 
-1. **Wake word:** an RMS energy gate wakes Rustpotter only when there is sound. Ship a prebuilt "Jarvis" model; setup offers optional training on the user's voice (3–5 samples) and custom wake words.
-   - **Rustpotter status (checked 2026-11-26):** 3.0.2 is the latest release, and the repo has had no commits since 2023-10-01. It does not compile with current dependencies: its `candle-core` 0.2.2 breaks with newer `half`. With `half` pinned to `=2.3.1` it builds and runs on Linux and passes `cargo check` for Windows (`x86_64-pc-windows-msvc`) and macOS (`aarch64-apple-darwin`). It is pure Rust, so there are no C dependencies to build. Accuracy and CPU use have not been measured yet.
-   - Keep the wake-word detector behind a trait in the `wake` crate so it can be swapped. Fallback: openWakeWord via ONNX if Rustpotter's accuracy is poor or the pin becomes untenable. Forking Rustpotter to update `candle` is the other option.
+1. **Wake word:** an RMS energy gate passes audio to the detector only when there is sound. The detector sits behind a `WakeDetector` trait with two engines:
+   - **Built-in "Hey Jarvis" (default):** openWakeWord's pretrained `hey_jarvis` model (a few MB of ONNX, trained on many synthetic voices, so it works for any speaker). It runs in the pure-Rust `tract` crate if that loads the models correctly; otherwise in `ort` (ONNX Runtime).
+   - **Custom or personal wake words (optional):** Rustpotter, trained on the device from 3–5 recordings of the user. Offered in setup and settings.
+   - **Rustpotter status (checked 2026-11-26):** 3.0.2 is the latest release, and the repo has had no commits since 2023-10-01. It does not compile with current dependencies: its `candle-core` 0.2.2 breaks with newer `half`. With `half` pinned to `=2.3.1` it builds and runs on Linux and passes `cargo check` for Windows (`x86_64-pc-windows-msvc`) and macOS (`aarch64-apple-darwin`). If the pin starts clashing with other dependencies, fork Rustpotter to update `candle`, or drop custom words.
+   - Plain "Jarvis" (without "Hey") as the built-in word would need our own openWakeWord model trained through its synthetic-speech pipeline. Not planned for now.
+   - Accuracy and CPU are measured in the wake-word bake-off (issue #2) before the `wake` crate is built; the results go here.
 2. **Hotkey:** push-to-talk. Default `Ctrl+Alt+Space` (Windows/Linux), `Option+Space` (macOS). Configurable. If the combination is taken, say so in the panel.
 3. **End of speech:** `earshot` VAD. Stop after **1 s** of silence following speech; hard cap **30 s**.
 4. **Speech-to-text:** Groq, `whisper-large-v3-turbo`, one batch upload per utterance. Language auto-detected.
@@ -125,7 +128,7 @@ The first screen lists what to have ready (Groq key required, Gemini key optiona
 1. Groq key (required)
 2. Gemini key (optional, privacy notice)
 3. Mic test
-4. Wake word (prebuilt or train)
+4. Wake word (built-in "Hey Jarvis", or train a custom/personal one)
 5. Offer local model download
 6. Start at login (default on)
 
@@ -162,7 +165,7 @@ GitHub Actions builds and tests on Windows, macOS and Linux for every push; tags
 
 ## Milestones
 
-1. **Windows MVP:** tray, prebuilt wake word, hotkey, VAD, Groq, Gemini, OS voice, search with bangs in a private window, open app/URL, volume, panel.
+1. **Windows MVP:** tray, built-in "Hey Jarvis" wake word, hotkey, VAD, Groq, Gemini, OS voice, search with bangs in a private window, open app/URL, volume, panel.
 2. Then: local model fallback, dictation, timers, notes, memory, weather, Kokoro, wake-word training, installer and updater, then macOS, Wayland and X11.
 
 ## Naming and licence

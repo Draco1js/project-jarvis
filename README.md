@@ -2,12 +2,12 @@
 
 A cross-platform voice assistant for the desktop (Windows, macOS, Linux), built in Rust with [GPUI](https://gpui.rs) via `gpui-kit`.
 
-Say "Jarvis" (or press the hotkey), ask something, and Jarvis answers out loud. It can search the web (with DuckDuckGo-style bangs, in a private window), open apps, URLs and folders, control volume and media, set timers and reminders, keep notes, and tell you the weather.
+Say "Hey Jarvis" (or press the hotkey), ask something, and Jarvis answers out loud. It can search the web (with DuckDuckGo-style bangs, in a private window), open apps, URLs and folders, control volume and media, set timers and reminders, keep notes, and tell you the weather.
 
 - Speech-to-text: Groq.
 - Answers: Gemini (free API key) first, an optional local model through `llama-server` as fallback.
 - Speech: your OS voice, or optional Kokoro.
-- Wake word: Rustpotter behind an energy gate, so idle CPU use stays near zero.
+- Wake word: openWakeWord ("Hey Jarvis") behind an energy gate, so idle CPU use stays near zero. Custom wake words via Rustpotter.
 
 > **Status:** early skeleton. The app opens a window and a tray icon; nothing else works yet. See [docs/DESIGN.md](docs/DESIGN.md) for the plan.
 
