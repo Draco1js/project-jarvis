@@ -85,6 +85,7 @@ fn conversation_starts_fresh_after_five_idle_minutes() {
     h.chat
         .will_reply("It is sunny.")
         .will_reply("Still here.")
+        .will_reply("Summary: Weather check.\nTags: weather")
         .will_reply("Hello.");
 
     h.type_text("Weather?");

@@ -54,7 +54,7 @@ fn plain_search_has_no_bang() {
 }
 
 #[test]
-fn the_editable_bang_list_is_offered_to_the_model() {
+fn the_editable_bang_list_is_given_to_the_model() {
     let mut h = Harness::new();
     h.actions
         .set_bangs(&[("YouTube", "yt"), ("Crates", "crates")]);
@@ -62,10 +62,10 @@ fn the_editable_bang_list_is_offered_to_the_model() {
 
     h.type_text("Hi");
 
-    let description = h.chat.tool("web_search").description;
-    assert!(description.contains("YouTube !yt"), "{description}");
-    assert!(description.contains("Crates !crates"), "{description}");
-    assert!(!description.contains("Reddit"), "{description}");
+    let prompt = h.chat.last_request()[0].content.clone();
+    assert!(prompt.contains("YouTube !yt"), "{prompt}");
+    assert!(prompt.contains("Crates !crates"), "{prompt}");
+    assert!(!prompt.contains("Reddit"), "{prompt}");
 }
 
 #[test]
@@ -290,12 +290,14 @@ fn volume_can_be_set_raised_lowered_and_muted() {
         .will_call("volume", json!({"change": "set", "level": 30}))
         .will_call("volume", json!({"change": "up"}))
         .will_call("volume", json!({"change": "down", "level": 5}))
+        .will_reply("Done.");
+    h.type_text("Volume things");
+    h.chat
         .will_call("volume", json!({"change": "mute"}))
         .will_call("volume", json!({"change": "unmute"}))
         .will_call("volume", json!({"change": "set", "level": 250}))
         .will_reply("Done.");
-
-    h.type_text("Volume things");
+    h.type_text("More volume things");
 
     assert_eq!(
         h.actions.done(),

@@ -23,14 +23,34 @@ pub(crate) struct Toolbox {
 }
 
 impl Toolbox {
-    /// The tools offered to the model, built from the current settings.
-    pub(crate) fn specs(&self, actions: &mut dyn Actions) -> Vec<ToolSpec> {
+    /// Names of the tools this handles.
+    pub(crate) const NAMES: &'static [&'static str] = &[
+        "web_search",
+        "open_url",
+        "open_app",
+        "open_folder",
+        "open_recent_file",
+        "volume",
+        "media",
+    ];
+
+    /// What the model must know to use the tools: the site bangs from the
+    /// settings. Goes in the system prompt.
+    pub(crate) fn prompt_context(&self, actions: &mut dyn Actions) -> String {
         let bangs = actions
             .bangs()
             .iter()
             .map(|b| format!("{} !{}", b.name, b.bang))
             .collect::<Vec<_>>()
             .join(", ");
+        format!(
+            "You can act on the computer only through the tools you are given; after acting, \
+confirm it in a few words. web_search bangs for sites the user may name: {bangs}."
+        )
+    }
+
+    /// The tools offered to the model.
+    pub(crate) fn specs() -> Vec<ToolSpec> {
         let folder = json!({
             "type": "string",
             "enum": FOLDERS.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
@@ -38,12 +58,10 @@ impl Toolbox {
         vec![
             spec(
                 "web_search",
-                format!(
-                    "Search the web in the user's browser. When the user names a site, or a \
-                     site clearly fits, pass its DuckDuckGo bang. Bangs for sites the user may \
-                     name: {bangs}. Any other DuckDuckGo bang also works. Leave the bang out \
-                     for a plain web search."
-                ),
+                "Search the web in the user's browser. When the user names a site, or a \
+                 site clearly fits, pass its DuckDuckGo bang (the system prompt lists the \
+                 user's sites). Any other DuckDuckGo bang also works. Leave the bang out \
+                 for a plain web search.",
                 json!({
                     "query": {"type": "string", "description": "What to search for."},
                     "bang": {"type": "string", "description": "A bang without the '!', e.g. \"yt\"."},
@@ -52,35 +70,33 @@ impl Toolbox {
             ),
             spec(
                 "open_url",
-                "Open a web page (http or https) in the user's browser.".into(),
+                "Open a web page (http or https) in the user's browser.",
                 json!({"url": {"type": "string"}}),
                 &["url"],
             ),
             spec(
                 "open_app",
                 "Open an installed app by name. If the name fits several apps, the user is \
-                 asked which one; call again with the exact name they pick."
-                    .into(),
+                 asked which one; call again with the exact name they pick.",
                 json!({"name": {"type": "string", "description": "The app's name as the user said it."}}),
                 &["name"],
             ),
             spec(
                 "open_folder",
-                "Open one of the user's folders in the file manager.".into(),
+                "Open one of the user's folders in the file manager.",
                 json!({"folder": folder}),
                 &["folder"],
             ),
             spec(
                 "open_recent_file",
-                "Open the most recently changed file in one of the user's folders.".into(),
+                "Open the most recently changed file in one of the user's folders.",
                 json!({"folder": folder}),
                 &["folder"],
             ),
             spec(
                 "volume",
                 "Change the system volume. `level` is the percentage for `set`, or how many \
-                 points to move for `up` and `down` (default 10)."
-                    .into(),
+                 points to move for `up` and `down` (default 10).",
                 json!({
                     "change": {"type": "string", "enum": ["set", "up", "down", "mute", "unmute"]},
                     "level": {"type": "integer", "minimum": 0, "maximum": 100},
@@ -89,7 +105,7 @@ impl Toolbox {
             ),
             spec(
                 "media",
-                "Press a media key: play or pause, next track, previous track.".into(),
+                "Press a media key: play or pause, next track, previous track.",
                 json!({"key": {"type": "string", "enum": ["play_pause", "next", "previous"]}}),
                 &["key"],
             ),
@@ -234,9 +250,14 @@ fn folder(name: &str) -> Option<Folder> {
         .map(|(_, f)| *f)
 }
 
-fn spec(name: &str, description: String, properties: Value, required: &[&str]) -> ToolSpec {
+fn spec(
+    name: &'static str,
+    description: &'static str,
+    properties: Value,
+    required: &[&str],
+) -> ToolSpec {
     ToolSpec {
-        name: name.into(),
+        name,
         description,
         parameters: json!({
             "type": "object",

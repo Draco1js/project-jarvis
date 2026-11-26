@@ -1,11 +1,13 @@
-//! Carries out computer actions on the real OS. The core decides what to do;
-//! this only does it. No shell is ever involved.
+//! The OS side of the assistant's tools: computer actions ([`SystemActions`])
+//! and weather. The core decides what to do; this only does it. No shell is
+//! ever involved.
 
 pub mod apps;
 pub mod browser;
 pub mod files;
 pub mod settings;
 pub mod volume;
+pub mod weather;
 
 #[cfg(target_os = "linux")]
 mod linux;

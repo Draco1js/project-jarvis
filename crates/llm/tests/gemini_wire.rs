@@ -220,20 +220,28 @@ fn gemini_defaults() {
     assert_eq!(jarvis_llm::DEFAULT_GEMINI_MODEL, "gemini-3.5-flash-lite");
 }
 
-fn search_tool() -> ToolSpec {
+fn timer_tool() -> ToolSpec {
     ToolSpec {
-        name: "web_search".into(),
-        description: "Search the web.".into(),
+        name: "set_timer",
+        description: "Start a countdown timer.",
         parameters: json!({
             "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
+            "properties": {"seconds": {"type": "integer"}},
+            "required": ["seconds"],
         }),
     }
 }
 
+fn completion(message: serde_json::Value) -> String {
+    json!({
+        "object": "chat.completion",
+        "choices": [{"index": 0, "finish_reason": "tool_calls", "message": message}],
+    })
+    .to_string()
+}
+
 #[test]
-fn offers_the_tools_and_returns_the_calls_the_model_asks_for() {
+fn tools_are_offered_as_functions_and_a_tool_call_comes_back_with_its_signature() {
     let mut server = mockito::Server::new();
     let mock = server
         .mock("POST", "/v1beta/openai/chat/completions")
@@ -241,111 +249,108 @@ fn offers_the_tools_and_returns_the_calls_the_model_asks_for() {
             "tools": [{
                 "type": "function",
                 "function": {
-                    "name": "web_search",
-                    "description": "Search the web.",
+                    "name": "set_timer",
+                    "description": "Start a countdown timer.",
                     "parameters": {
                         "type": "object",
-                        "properties": {"query": {"type": "string"}},
-                        "required": ["query"],
+                        "properties": {"seconds": {"type": "integer"}},
+                        "required": ["seconds"],
                     },
                 },
             }],
         })))
         .with_status(200)
-        .with_body(
-            json!({
-                "choices": [{
-                    "index": 0,
-                    "finish_reason": "tool_calls",
-                    "message": {
-                        "role": "assistant",
-                        "tool_calls": [{
-                            "id": "call-1",
-                            "type": "function",
-                            "function": {"name": "web_search", "arguments": "{\"query\":\"cats\"}"},
-                            "extra_content": {"google": {"thought_signature": "sig=="}},
-                        }],
-                    },
-                }],
-            })
-            .to_string(),
-        )
+        .with_body(completion(json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "set_timer", "arguments": "{\"seconds\":300}"},
+                "extra_content": {"google": {"thought_signature": "sig-A"}},
+            }],
+        })))
         .create();
 
-    let reply = client(&server).chat(&conversation(), &[search_tool()]);
+    let reply = client(&server).chat(&conversation(), &[timer_tool()]);
 
     mock.assert();
     let Ok(Reply::ToolCalls(calls)) = reply else {
         panic!("expected tool calls, got {reply:?}");
     };
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].id, "call-1");
-    assert_eq!(calls[0].name, "web_search");
-    let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
-    assert_eq!(args, json!({"query": "cats"}));
+    assert_eq!(calls[0].id, "call_1");
+    assert_eq!(calls[0].name, "set_timer");
+    assert_eq!(calls[0].arguments, "{\"seconds\":300}");
     let data: serde_json::Value =
         serde_json::from_str(calls[0].provider_data.as_deref().unwrap()).unwrap();
-    assert_eq!(data, json!({"google": {"thought_signature": "sig=="}}));
+    assert_eq!(
+        data,
+        json!({"extra_content": {"google": {"thought_signature": "sig-A"}}})
+    );
 }
 
 #[test]
-fn no_tools_means_no_tools_field() {
+fn no_tools_key_is_sent_when_none_are_offered() {
     let mut server = mockito::Server::new();
-    let mock = server
+    let with_tools = server
         .mock("POST", "/v1beta/openai/chat/completions")
-        .match_request(|request| {
-            let body: serde_json::Value = serde_json::from_slice(request.body().unwrap()).unwrap();
-            body.get("tools").is_none()
-        })
+        .match_body(Matcher::Regex("\"tools\"".into()))
+        .expect(0)
+        .create();
+    let _any = server
+        .mock("POST", "/v1beta/openai/chat/completions")
         .with_status(200)
-        .with_body(r#"{"choices":[{"message":{"role":"assistant","content":"Hi."}}]}"#)
+        .with_body(completion(json!({"role": "assistant", "content": "Hi."})))
         .create();
 
     let reply = client(&server).chat(&conversation(), &[]);
 
-    mock.assert();
+    with_tools.assert();
     assert_eq!(reply, Ok(Reply::Text("Hi.".into())));
 }
 
 #[test]
-fn sends_back_the_calls_with_their_signature_and_the_results() {
-    let call = ToolCall {
-        id: "call-1".into(),
-        name: "web_search".into(),
-        arguments: r#"{"query":"cats"}"#.into(),
-        provider_data: Some(r#"{"google":{"thought_signature":"sig=="}}"#.into()),
-    };
-    let messages = vec![
-        Message::new(Role::System, "Be brief."),
-        Message::new(Role::User, "Search cats"),
-        Message::calls(vec![call]),
-        Message::tool_result("call-1", "Opened."),
-    ];
+fn tool_calls_and_results_are_sent_back_with_the_signature_unchanged() {
     let mut server = mockito::Server::new();
     let mock = server
         .mock("POST", "/v1beta/openai/chat/completions")
         .match_body(Matcher::PartialJson(json!({
             "messages": [
-                {"role": "system", "content": "Be brief."},
-                {"role": "user", "content": "Search cats"},
+                {"role": "user", "content": "Five minute timer"},
                 {
                     "role": "assistant",
                     "tool_calls": [{
-                        "id": "call-1",
+                        "id": "call_1",
                         "type": "function",
-                        "function": {"name": "web_search", "arguments": "{\"query\":\"cats\"}"},
-                        "extra_content": {"google": {"thought_signature": "sig=="}},
+                        "function": {"name": "set_timer", "arguments": "{\"seconds\":300}"},
+                        "extra_content": {"google": {"thought_signature": "sig-A"}},
                     }],
                 },
-                {"role": "tool", "tool_call_id": "call-1", "content": "Opened."},
+                {"role": "tool", "tool_call_id": "call_1", "content": "Timer 1 set."},
             ],
         })))
         .with_status(200)
-        .with_body(r#"{"choices":[{"message":{"role":"assistant","content":"Done."}}]}"#)
+        .with_body(completion(
+            json!({"role": "assistant", "content": "Timer set."}),
+        ))
         .create();
+    let call = ToolCall {
+        id: "call_1".into(),
+        name: "set_timer".into(),
+        arguments: "{\"seconds\":300}".into(),
+        provider_data: Some(
+            json!({"extra_content": {"google": {"thought_signature": "sig-A"}}}).to_string(),
+        ),
+    };
+    let messages = vec![
+        Message::new(Role::User, "Five minute timer"),
+        Message::tool_calls(vec![call]),
+        Message::tool_result("call_1", "Timer 1 set."),
+    ];
 
-    let reply = client(&server).chat(&messages, &[search_tool()]);
+    let reply = client(&server).chat(&messages, &[timer_tool()]);
 
     mock.assert();
-    assert_eq!(reply, Ok(Reply::Text("Done.".into())));
+    assert_eq!(reply, Ok(Reply::Text("Timer set.".into())));
 }

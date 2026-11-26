@@ -7,10 +7,13 @@
 
 mod actions;
 mod assistant;
+mod memory;
 pub mod ports;
+mod tools;
 
 pub use assistant::{Assistant, Input, Output};
 pub use ports::{
     Action, Actions, App, Bang, Browser, BrowserKind, ChatError, ChatProvider, Clock, Folder,
-    MediaKey, Message, Ports, Reply, Role, Speaker, Store, ToolCall, ToolSpec, Volume,
+    MediaKey, MemoryHit, MemoryKind, Message, Notifier, Ports, Reminder, ReminderKind, Reminders,
+    Reply, Role, Speaker, Store, Tagged, ToolCall, ToolSpec, Volume, Weather,
 };

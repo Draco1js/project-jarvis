@@ -3,10 +3,14 @@
 //! The conversation lives in a [`Conversation`] entity owned by the app, not by
 //! the window, so closing the window (which only hides Jarvis) loses nothing
 //! and reopening it from the tray shows the same conversation.
+//!
+//! Until a settings window exists, its controls (so far only "Clear history")
+//! sit in a row under the input box.
 
 use std::rc::Rc;
 
 use gpui_kit::{
+    component::button::{Button, ButtonVariants},
     component::input::{Input as TextInput, InputEvent, InputState},
     component::label::Label,
     *,
@@ -19,6 +23,8 @@ pub enum Line {
     You(String),
     Jarvis(String),
     Problem(String),
+    /// A timer, alarm or reminder that went off.
+    Reminder(String),
 }
 
 /// What the main window shows. Updated from the assistant's outputs.
@@ -42,6 +48,14 @@ impl Conversation {
                 self.thinking = false;
                 self.lines.push(Line::Problem(text));
             }
+            Output::ReminderDue { title, body, .. } => {
+                let text = if body.is_empty() {
+                    title
+                } else {
+                    format!("{title}: {body}")
+                };
+                self.lines.push(Line::Reminder(text));
+            }
         }
     }
 }
@@ -49,6 +63,7 @@ impl Conversation {
 pub struct MainWindow {
     conversation: Entity<Conversation>,
     input: Entity<InputState>,
+    send: Rc<dyn Fn(Input)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -62,12 +77,15 @@ impl MainWindow {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Ask Jarvis something…"));
         let subscriptions = vec![
             cx.observe(&conversation, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&input, window, move |_, input, event, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    let text = input.read(cx).value().trim().to_string();
-                    if !text.is_empty() {
-                        input.update(cx, |input, cx| input.set_value("", window, cx));
-                        send(Input::Typed(text));
+            cx.subscribe_in(&input, window, {
+                let send = send.clone();
+                move |_, input, event, window, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        let text = input.read(cx).value().trim().to_string();
+                        if !text.is_empty() {
+                            input.update(cx, |input, cx| input.set_value("", window, cx));
+                            send(Input::Typed(text));
+                        }
                     }
                 }
             }),
@@ -76,6 +94,7 @@ impl MainWindow {
         Self {
             conversation,
             input,
+            send,
             _subscriptions: subscriptions,
         }
     }
@@ -99,6 +118,7 @@ impl Render for MainWindow {
                 Line::You(text) => Label::new(format!("You: {text}")),
                 Line::Jarvis(text) => Label::new(format!("Jarvis: {text}")),
                 Line::Problem(text) => Label::new(format!("⚠ {text}")),
+                Line::Reminder(text) => Label::new(format!("⏰ {text}")),
             });
         }
         if conversation.thinking {
@@ -113,5 +133,12 @@ impl Render for MainWindow {
             .p_4()
             .child(lines)
             .child(TextInput::new(&self.input))
+            .child(div().flex().justify_end().child({
+                let send = self.send.clone();
+                Button::new("clear-history")
+                    .ghost()
+                    .label("Clear history")
+                    .on_click(move |_, _, _| send(Input::ClearHistory))
+            }))
     }
 }

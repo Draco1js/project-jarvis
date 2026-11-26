@@ -15,9 +15,9 @@ pub enum Role {
 pub struct Message {
     pub role: Role,
     pub content: String,
-    /// Tools the assistant asked to run (assistant messages only).
+    /// Tools the model asked to call (assistant messages only).
     pub tool_calls: Vec<ToolCall>,
-    /// The call this message answers (tool messages only).
+    /// Which call this message answers (tool messages only).
     pub tool_call_id: Option<String>,
 }
 
@@ -31,15 +31,15 @@ impl Message {
         }
     }
 
-    /// An assistant turn that asks for tools to be run.
-    pub fn calls(tool_calls: Vec<ToolCall>) -> Self {
+    /// The model's request to call tools, kept in the conversation.
+    pub fn tool_calls(calls: Vec<ToolCall>) -> Self {
         Self {
-            tool_calls,
+            tool_calls: calls,
             ..Self::new(Role::Assistant, "")
         }
     }
 
-    /// The result of running the tool call `call_id`.
+    /// What a tool call returned, sent back to the model.
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             tool_call_id: Some(call_id.into()),
@@ -48,25 +48,25 @@ impl Message {
     }
 }
 
-/// A request from the model to run one tool.
+/// A tool the model may call, described as a JSON-schema function.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolSpec {
+    pub name: &'static str,
+    pub description: &'static str,
+    /// JSON schema of the arguments object.
+    pub parameters: serde_json::Value,
+}
+
+/// One tool call the model asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
-    /// The arguments as a JSON object, as the model wrote them.
+    /// The arguments as the JSON text the model sent.
     pub arguments: String,
-    /// Provider data that must go back with the call unchanged, as raw JSON
-    /// (Gemini 3's `extra_content`, which holds the thought signature).
+    /// Provider data that must go back unchanged with this call (Gemini 3's
+    /// thought signature lives here), as JSON text. The core never reads it.
     pub provider_data: Option<String>,
-}
-
-/// A tool offered to the model.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolSpec {
-    pub name: String,
-    pub description: String,
-    /// JSON Schema of the arguments object.
-    pub parameters: serde_json::Value,
 }
 
 /// What the model answered.
@@ -74,7 +74,7 @@ pub struct ToolSpec {
 pub enum Reply {
     /// A final answer for the user.
     Text(String),
-    /// Run these tools and send the results back.
+    /// Run these tools and send back their results.
     ToolCalls(Vec<ToolCall>),
 }
 
@@ -109,14 +109,54 @@ pub trait Speaker: Send {
     fn speak(&mut self, text: &str);
 }
 
-/// Persistent history.
+/// A short summary plus search tags, written by the model for a finished
+/// conversation or a new note.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Tagged {
+    pub summary: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryKind {
+    Conversation,
+    Note,
+}
+
+/// One search result from memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryHit {
+    pub kind: MemoryKind,
+    /// When the conversation started or the note was written.
+    pub at: SystemTime,
+    pub summary: String,
+    pub tags: Vec<String>,
+    /// The matching part of the conversation or note text.
+    pub excerpt: String,
+}
+
+/// Persistent history, memory and notes.
 pub trait Store: Send {
+    /// Add a message to the current conversation, starting one if needed.
     fn save_message(&mut self, at: SystemTime, message: &Message);
+    /// Close the current conversation with its summary and tags, making it searchable.
+    fn end_conversation(&mut self, at: SystemTime, tagged: &Tagged);
+    /// Delete all saved conversations. Notes are kept.
+    fn clear_history(&mut self);
+    /// Full-text search over conversations and notes, best match first.
+    fn search(&mut self, query: &str, limit: usize) -> Vec<MemoryHit>;
+    /// Save a note; returns where it went, or why it could not be saved.
+    fn save_note(&mut self, at: SystemTime, text: &str, tagged: &Tagged) -> Result<String, String>;
 }
 
 /// Wall-clock time, so tests can control it.
 pub trait Clock: Send {
     fn now(&self) -> SystemTime;
+
+    /// The local time zone's offset from UTC right now, in seconds.
+    fn utc_offset_secs(&self) -> i32 {
+        0
+    }
 }
 
 /// The clock the app uses.
@@ -126,6 +166,50 @@ impl Clock for SystemClock {
     fn now(&self) -> SystemTime {
         SystemTime::now()
     }
+
+    fn utc_offset_secs(&self) -> i32 {
+        chrono::Local::now().offset().local_minus_utc()
+    }
+}
+
+/// What a reminder is, which decides how it is announced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReminderKind {
+    Timer,
+    Alarm,
+    Reminder,
+}
+
+/// A timer, alarm or reminder waiting to go off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reminder {
+    pub id: i64,
+    pub kind: ReminderKind,
+    /// The label ("tea") or reminder text ("call mum"); may be empty.
+    pub text: String,
+    pub due: SystemTime,
+}
+
+/// Saved timers, alarms and reminders. Must survive restarts.
+pub trait Reminders: Send {
+    /// Save a new one and return its id.
+    fn add(&mut self, kind: ReminderKind, text: &str, due: SystemTime) -> i64;
+    /// Every one that has not gone off or been cancelled, soonest first.
+    fn pending(&mut self) -> Vec<Reminder>;
+    /// Forget one (it went off or was cancelled). False if there was none.
+    fn remove(&mut self, id: i64) -> bool;
+}
+
+/// Native desktop notifications.
+pub trait Notifier: Send {
+    fn notify(&mut self, title: &str, body: &str);
+}
+
+/// Weather reports (wttr.in in the app).
+pub trait Weather: Send {
+    /// A short plain-text report for `place`, or for the user's own location
+    /// (city setting, else IP location) when `place` is `None`.
+    fn report(&mut self, place: Option<&str>) -> Result<String, String>;
 }
 
 /// Acts on the computer. The core decides *what* to do (which URL, which
@@ -243,5 +327,8 @@ pub struct Ports {
     pub speaker: Box<dyn Speaker>,
     pub store: Box<dyn Store>,
     pub clock: Box<dyn Clock>,
+    pub reminders: Box<dyn Reminders>,
+    pub notifier: Box<dyn Notifier>,
+    pub weather: Box<dyn Weather>,
     pub actions: Box<dyn Actions>,
 }

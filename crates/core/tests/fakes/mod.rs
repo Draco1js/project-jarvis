@@ -10,15 +10,16 @@ use std::time::{Duration, SystemTime};
 
 use jarvis_core::{
     Action, Actions, App, Assistant, Bang, Browser, BrowserKind, ChatError, ChatProvider, Clock,
-    Input, Message, Output, Ports, Reply, Role, Speaker, Store, ToolCall, ToolSpec,
+    Input, MemoryHit, Message, Notifier, Output, Ports, Reminder, ReminderKind, Reminders, Reply,
+    Role, Speaker, Store, Tagged, ToolCall, ToolSpec, Weather,
 };
 
 #[derive(Clone, Default)]
 pub struct FakeChat {
     replies: Arc<Mutex<VecDeque<Result<Reply, ChatError>>>>,
     requests: Arc<Mutex<Vec<Vec<Message>>>>,
-    tools: Arc<Mutex<Vec<Vec<ToolSpec>>>>,
-    calls_made: Arc<Mutex<usize>>,
+    tools: Arc<Mutex<Vec<Vec<String>>>>,
+    next_call: Arc<Mutex<u32>>,
 }
 
 impl FakeChat {
@@ -30,27 +31,25 @@ impl FakeChat {
         self
     }
 
-    pub fn will_fail(&self, error: ChatError) -> &Self {
-        self.replies.lock().unwrap().push_back(Err(error));
-        self
-    }
-
-    /// The model will ask for one tool call; `arguments` is a JSON object.
+    /// The next reply asks to call the tool `name` with these JSON arguments.
     pub fn will_call(&self, name: &str, arguments: serde_json::Value) -> &Self {
-        let id = {
-            let mut n = self.calls_made.lock().unwrap();
-            *n += 1;
-            format!("call-{n}")
+        let mut next = self.next_call.lock().unwrap();
+        *next += 1;
+        let call = ToolCall {
+            id: format!("call-{next}"),
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+            provider_data: None,
         };
         self.replies
             .lock()
             .unwrap()
-            .push_back(Ok(Reply::ToolCalls(vec![ToolCall {
-                id,
-                name: name.to_string(),
-                arguments: arguments.to_string(),
-                provider_data: None,
-            }])));
+            .push_back(Ok(Reply::ToolCalls(vec![call])));
+        self
+    }
+
+    pub fn will_fail(&self, error: ChatError) -> &Self {
+        self.replies.lock().unwrap().push_back(Err(error));
         self
     }
 
@@ -66,8 +65,8 @@ impl FakeChat {
             .expect("no chat request made")
     }
 
-    /// The tools offered with the last request.
-    pub fn last_tools(&self) -> Vec<ToolSpec> {
+    /// The names of the tools offered with the last request.
+    pub fn last_tools(&self) -> Vec<String> {
         self.tools
             .lock()
             .unwrap()
@@ -76,15 +75,12 @@ impl FakeChat {
             .unwrap_or_default()
     }
 
-    /// The tool called `name` from the last request.
-    pub fn tool(&self, name: &str) -> ToolSpec {
-        self.last_tools()
-            .into_iter()
-            .find(|t| t.name == name)
-            .unwrap_or_else(|| panic!("no tool called {name} was offered"))
+    /// The names of the tools offered with each request, in order.
+    pub fn offered_tools(&self) -> Vec<Vec<String>> {
+        self.tools.lock().unwrap().clone()
     }
 
-    /// The tool results in the last request, in order.
+    /// What the tools returned, as last sent back to the model.
     pub fn last_tool_results(&self) -> Vec<String> {
         self.last_request()
             .into_iter()
@@ -97,7 +93,10 @@ impl FakeChat {
 impl ChatProvider for FakeChat {
     fn chat(&mut self, messages: &[Message], tools: &[ToolSpec]) -> Result<Reply, ChatError> {
         self.requests.lock().unwrap().push(messages.to_vec());
-        self.tools.lock().unwrap().push(tools.to_vec());
+        self.tools
+            .lock()
+            .unwrap()
+            .push(tools.iter().map(|t| t.name.to_string()).collect());
         self.replies
             .lock()
             .unwrap()
@@ -123,14 +122,51 @@ impl Speaker for FakeSpeaker {
     }
 }
 
+/// A saved note: when, its text, and its summary and tags.
+pub type SavedNote = (SystemTime, String, Tagged);
+
 #[derive(Clone, Default)]
 pub struct FakeStore {
     saved: Arc<Mutex<Vec<(SystemTime, Role, String)>>>,
+    ended: Arc<Mutex<Vec<(SystemTime, Tagged)>>>,
+    clears: Arc<Mutex<usize>>,
+    searches: Arc<Mutex<Vec<String>>>,
+    hits: Arc<Mutex<Vec<MemoryHit>>>,
+    notes: Arc<Mutex<Vec<SavedNote>>>,
+    note_error: Arc<Mutex<Option<String>>>,
 }
 
 impl FakeStore {
     pub fn saved(&self) -> Vec<(SystemTime, Role, String)> {
         self.saved.lock().unwrap().clone()
+    }
+
+    /// Conversations closed, with the time and summary.
+    pub fn ended(&self) -> Vec<(SystemTime, Tagged)> {
+        self.ended.lock().unwrap().clone()
+    }
+
+    pub fn clears(&self) -> usize {
+        *self.clears.lock().unwrap()
+    }
+
+    /// Every search query, in order.
+    pub fn searches(&self) -> Vec<String> {
+        self.searches.lock().unwrap().clone()
+    }
+
+    /// Searches return these hits.
+    pub fn will_find(&self, hits: Vec<MemoryHit>) {
+        *self.hits.lock().unwrap() = hits;
+    }
+
+    pub fn notes(&self) -> Vec<SavedNote> {
+        self.notes.lock().unwrap().clone()
+    }
+
+    /// Saving a note fails with this reason.
+    pub fn notes_fail(&self, reason: &str) {
+        *self.note_error.lock().unwrap() = Some(reason.to_string());
     }
 }
 
@@ -141,28 +177,158 @@ impl Store for FakeStore {
             .unwrap()
             .push((at, message.role, message.content.clone()));
     }
+
+    fn end_conversation(&mut self, at: SystemTime, tagged: &Tagged) {
+        self.ended.lock().unwrap().push((at, tagged.clone()));
+    }
+
+    fn clear_history(&mut self) {
+        *self.clears.lock().unwrap() += 1;
+    }
+
+    fn search(&mut self, query: &str, limit: usize) -> Vec<MemoryHit> {
+        self.searches.lock().unwrap().push(query.to_string());
+        self.hits
+            .lock()
+            .unwrap()
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    fn save_note(&mut self, at: SystemTime, text: &str, tagged: &Tagged) -> Result<String, String> {
+        if let Some(reason) = self.note_error.lock().unwrap().clone() {
+            return Err(reason);
+        }
+        self.notes
+            .lock()
+            .unwrap()
+            .push((at, text.to_string(), tagged.clone()));
+        Ok("Jarvis Notes/note.md".to_string())
+    }
 }
 
 #[derive(Clone)]
 pub struct FakeClock {
     now: Arc<Mutex<SystemTime>>,
+    offset: Arc<Mutex<i32>>,
 }
 
 impl FakeClock {
     pub fn starting_at(start: SystemTime) -> Self {
         Self {
             now: Arc::new(Mutex::new(start)),
+            offset: Arc::new(Mutex::new(0)),
         }
     }
 
     pub fn advance(&self, by: Duration) {
         *self.now.lock().unwrap() += by;
     }
+
+    /// Put the clock in a time zone `secs` ahead of UTC.
+    pub fn set_utc_offset(&self, secs: i32) {
+        *self.offset.lock().unwrap() = secs;
+    }
 }
 
 impl Clock for FakeClock {
     fn now(&self) -> SystemTime {
         *self.now.lock().unwrap()
+    }
+
+    fn utc_offset_secs(&self) -> i32 {
+        *self.offset.lock().unwrap()
+    }
+}
+
+/// In-memory reminders. Clones share the same list, like one database file.
+#[derive(Clone, Default)]
+pub struct FakeReminders {
+    items: Arc<Mutex<Vec<Reminder>>>,
+    next_id: Arc<Mutex<i64>>,
+}
+
+impl FakeReminders {
+    pub fn all(&self) -> Vec<Reminder> {
+        self.items.lock().unwrap().clone()
+    }
+}
+
+impl Reminders for FakeReminders {
+    fn add(&mut self, kind: ReminderKind, text: &str, due: SystemTime) -> i64 {
+        let mut next = self.next_id.lock().unwrap();
+        *next += 1;
+        self.items.lock().unwrap().push(Reminder {
+            id: *next,
+            kind,
+            text: text.to_string(),
+            due,
+        });
+        *next
+    }
+
+    fn pending(&mut self) -> Vec<Reminder> {
+        let mut items = self.all();
+        items.sort_by_key(|r| r.due);
+        items
+    }
+
+    fn remove(&mut self, id: i64) -> bool {
+        let mut items = self.items.lock().unwrap();
+        let before = items.len();
+        items.retain(|r| r.id != id);
+        items.len() != before
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct FakeNotifier {
+    shown: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl FakeNotifier {
+    /// Every notification shown, as (title, body).
+    pub fn shown(&self) -> Vec<(String, String)> {
+        self.shown.lock().unwrap().clone()
+    }
+}
+
+impl Notifier for FakeNotifier {
+    fn notify(&mut self, title: &str, body: &str) {
+        self.shown
+            .lock()
+            .unwrap()
+            .push((title.to_string(), body.to_string()));
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct FakeWeather {
+    asked: Arc<Mutex<Vec<Option<String>>>>,
+    answer: Arc<Mutex<Option<Result<String, String>>>>,
+}
+
+impl FakeWeather {
+    pub fn will_report(&self, answer: Result<&str, &str>) {
+        *self.answer.lock().unwrap() = Some(answer.map(str::to_string).map_err(str::to_string));
+    }
+
+    /// The place asked for in each lookup (`None` = the user's own location).
+    pub fn asked(&self) -> Vec<Option<String>> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+impl Weather for FakeWeather {
+    fn report(&mut self, place: Option<&str>) -> Result<String, String> {
+        self.asked.lock().unwrap().push(place.map(str::to_string));
+        self.answer
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| Ok("Sunny, 25°C.".into()))
     }
 }
 
@@ -278,6 +444,9 @@ pub struct Harness {
     pub speaker: FakeSpeaker,
     pub store: FakeStore,
     pub clock: FakeClock,
+    pub reminders: FakeReminders,
+    pub notifier: FakeNotifier,
+    pub weather: FakeWeather,
     pub actions: FakeActions,
 }
 
@@ -287,22 +456,61 @@ impl Harness {
         let speaker = FakeSpeaker::default();
         let store = FakeStore::default();
         let clock = FakeClock::starting_at(start_time());
+        let reminders = FakeReminders::default();
+        let notifier = FakeNotifier::default();
+        let weather = FakeWeather::default();
         let actions = FakeActions::default();
-        let assistant = Assistant::new(Ports {
-            chat: Box::new(chat.clone()),
-            speaker: Box::new(speaker.clone()),
-            store: Box::new(store.clone()),
-            clock: Box::new(clock.clone()),
-            actions: Box::new(actions.clone()),
-        });
+        let assistant = Self::assistant(
+            &chat, &speaker, &store, &clock, &reminders, &notifier, &weather, &actions,
+        );
         Self {
             assistant,
             chat,
             speaker,
             store,
             clock,
+            reminders,
+            notifier,
+            weather,
             actions,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assistant(
+        chat: &FakeChat,
+        speaker: &FakeSpeaker,
+        store: &FakeStore,
+        clock: &FakeClock,
+        reminders: &FakeReminders,
+        notifier: &FakeNotifier,
+        weather: &FakeWeather,
+        actions: &FakeActions,
+    ) -> Assistant {
+        Assistant::new(Ports {
+            chat: Box::new(chat.clone()),
+            speaker: Box::new(speaker.clone()),
+            store: Box::new(store.clone()),
+            clock: Box::new(clock.clone()),
+            reminders: Box::new(reminders.clone()),
+            notifier: Box::new(notifier.clone()),
+            weather: Box::new(weather.clone()),
+            actions: Box::new(actions.clone()),
+        })
+    }
+
+    /// Quit Jarvis and start it again: a new assistant on the same saved data.
+    pub fn restart(&mut self) {
+        self.assistant = Self::assistant(
+            &self.chat,
+            &self.speaker,
+            &self.store,
+            &self.clock,
+            &self.reminders,
+            &self.notifier,
+            &self.weather,
+            &self.actions,
+        );
     }
 
     /// Feed one input and collect everything the assistant emitted.
@@ -314,5 +522,9 @@ impl Harness {
 
     pub fn type_text(&mut self, text: &str) -> Vec<Output> {
         self.send(Input::Typed(text.to_string()))
+    }
+
+    pub fn tick(&mut self) -> Vec<Output> {
+        self.send(Input::Tick)
     }
 }
