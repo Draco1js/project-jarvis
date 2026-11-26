@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use jarvis_core::{Assistant, Input, Message, Output, Ports, Speaker, Store, ports::SystemClock};
 use jarvis_llm::OpenAiChat;
+use jarvis_tools::{ActionSettings, SystemActions};
 use jarvis_tts::OsVoice;
 
 /// Handle to the assistant thread.
@@ -30,6 +31,7 @@ impl Engine {
                     }
                 };
                 let mut assistant = Assistant::new(Ports {
+                    actions: Box::new(system_actions()),
                     chat: Box::new(OpenAiChat::gemini(gemini_key)),
                     speaker,
                     store: Box::new(NoHistory),
@@ -56,6 +58,22 @@ impl Engine {
     pub fn poll(&self) -> Option<Output> {
         self.outputs.try_recv().ok()
     }
+}
+
+/// The computer actions, configured by `actions.json` in the data folder.
+/// The file is written with the defaults on first run so it can be edited.
+fn system_actions() -> SystemActions {
+    let Some(path) = jarvis_store::data_dir().map(|dir| dir.join("actions.json")) else {
+        log::warn!("no data folder on this system; using default action settings");
+        return SystemActions::new(ActionSettings::default());
+    };
+    let settings = ActionSettings::load(&path);
+    if !path.exists()
+        && let Err(err) = settings.save(&path)
+    {
+        log::warn!("cannot write {}: {err}", path.display());
+    }
+    SystemActions::new(settings)
 }
 
 /// Used when the OS has no voice.

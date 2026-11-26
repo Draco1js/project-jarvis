@@ -2,7 +2,11 @@
 
 use std::time::{Duration, SystemTime};
 
-use crate::ports::{ChatError, Message, Ports, Role};
+use crate::actions::{Outcome, Toolbox};
+use crate::ports::{ChatError, Message, Ports, Reply, Role};
+
+/// Most model calls in one turn, so a model stuck calling tools can't loop forever.
+const MAX_TOOL_ROUNDS: usize = 6;
 
 /// Idle time after which the next question starts a new conversation.
 pub const CONVERSATION_IDLE_RESET: Duration = Duration::from_secs(5 * 60);
@@ -12,6 +16,7 @@ pub const CONVERSATION_IDLE_RESET: Duration = Duration::from_secs(5 * 60);
 pub const SYSTEM_PROMPT: &str = "You are a helpful desktop voice assistant. \
 Your replies are read aloud, so keep them short, plain and conversational, without markdown. \
 Always reply in English, whatever language the user speaks. \
+You can act on the computer only through the tools you are given; after acting, confirm it in a few words. \
 Never say \"Jarvis\" in a reply, not even when the user calls you that.";
 
 /// Something that happened that the assistant should react to.
@@ -39,6 +44,7 @@ pub enum Output {
 pub struct Assistant {
     ports: Ports,
     history: Vec<Message>,
+    toolbox: Toolbox,
     last_activity: Option<SystemTime>,
 }
 
@@ -47,6 +53,7 @@ impl Assistant {
         Self {
             ports,
             history: Vec::new(),
+            toolbox: Toolbox::default(),
             last_activity: None,
         }
     }
@@ -64,22 +71,62 @@ impl Assistant {
         let question = Message::new(Role::User, text);
         emit(Output::Thinking);
 
-        let mut request = Vec::with_capacity(self.history.len() + 2);
-        request.push(Message::new(Role::System, SYSTEM_PROMPT));
-        request.extend(self.history.iter().cloned());
-        request.push(question.clone());
-
-        match self.ports.chat.chat(&request) {
-            Ok(reply) => {
-                let reply = Message::new(Role::Assistant, reply);
-                self.remember(question);
-                self.remember(reply.clone());
-                self.ports.speaker.speak(&reply.content);
-                emit(Output::Reply(reply.content));
+        match self.run_turn(question) {
+            Ok((turn, reply)) => {
+                for message in turn {
+                    self.remember(message);
+                }
+                self.ports.speaker.speak(&reply);
+                emit(Output::Reply(reply));
             }
             Err(error) => emit(Output::Problem(describe(&error))),
         }
         self.last_activity = Some(self.ports.clock.now());
+    }
+
+    /// Talks to the model, running the tools it asks for, until it answers.
+    /// Returns every message of the turn and the text to show and speak.
+    fn run_turn(&mut self, question: Message) -> Result<(Vec<Message>, String), ChatError> {
+        let tools = self.toolbox.specs(self.ports.actions.as_mut());
+        let mut turn = vec![question];
+        let mut notices = Vec::new();
+        for _ in 0..MAX_TOOL_ROUNDS {
+            let mut request = Vec::with_capacity(self.history.len() + turn.len() + 1);
+            request.push(Message::new(Role::System, SYSTEM_PROMPT));
+            request.extend(self.history.iter().cloned());
+            request.extend(turn.iter().cloned());
+
+            let calls = match self.ports.chat.chat(&request, &tools)? {
+                Reply::Text(text) => {
+                    let text = with_notices(text, &notices);
+                    turn.push(Message::new(Role::Assistant, text.clone()));
+                    return Ok((turn, text));
+                }
+                Reply::ToolCalls(calls) => calls,
+            };
+            turn.push(Message::calls(calls.clone()));
+            let mut question = None;
+            for call in &calls {
+                let result = match self
+                    .toolbox
+                    .run(call, self.ports.actions.as_mut(), &mut notices)
+                {
+                    Outcome::Done(result) => result,
+                    Outcome::Ask(ask) => {
+                        let result = format!("Not done yet: asked the user \"{ask}\"");
+                        question.get_or_insert(ask);
+                        result
+                    }
+                };
+                turn.push(Message::tool_result(&call.id, result));
+            }
+            if let Some(ask) = question {
+                let text = with_notices(ask, &notices);
+                turn.push(Message::new(Role::Assistant, text.clone()));
+                return Ok((turn, text));
+            }
+        }
+        Err(ChatError::Other("the model kept calling tools".into()))
     }
 
     fn remember(&mut self, message: Message) {
@@ -104,6 +151,18 @@ impl Assistant {
             emit(Output::ConversationReset);
         }
     }
+}
+
+/// The reply followed by anything the user must be told once.
+fn with_notices(reply: String, notices: &[String]) -> String {
+    let mut text = reply;
+    for notice in notices {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(notice);
+    }
+    text
 }
 
 /// A short message for the user explaining a failed request.

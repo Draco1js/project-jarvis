@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use jarvis_core::{ChatError, ChatProvider, Message, Role};
+use jarvis_core::{ChatError, ChatProvider, Message, Reply, Role, ToolCall, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -78,12 +78,51 @@ fn agent(timeout: Duration) -> ureq::Agent {
 struct Request<'a> {
     model: &'a str,
     messages: Vec<WireMessage<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<WireTool<'a>>,
 }
 
 #[derive(Serialize)]
 struct WireMessage<'a> {
     role: &'static str,
-    content: &'a str,
+    /// Left out of an assistant turn that only calls tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<WireCall<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct WireTool<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireFunction<'a>,
+}
+
+#[derive(Serialize)]
+struct WireFunction<'a> {
+    name: &'a str,
+    description: &'a str,
+    parameters: &'a Value,
+}
+
+#[derive(Serialize)]
+struct WireCall<'a> {
+    id: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireCallFunction<'a>,
+    /// Gemini 3 rejects a follow-up whose calls lost their thought signature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extra_content: Option<Value>,
+}
+
+#[derive(Serialize)]
+struct WireCallFunction<'a> {
+    name: &'a str,
+    arguments: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -99,22 +138,70 @@ struct Choice {
 #[derive(Deserialize)]
 struct ReplyMessage {
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ReplyCall>,
+}
+
+#[derive(Deserialize)]
+struct ReplyCall {
+    #[serde(default)]
+    id: String,
+    function: ReplyFunction,
+    extra_content: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct ReplyFunction {
+    name: String,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+fn wire_message(m: &Message) -> WireMessage<'_> {
+    let only_calls = m.role == Role::Assistant && !m.tool_calls.is_empty() && m.content.is_empty();
+    WireMessage {
+        role: match m.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        },
+        content: (!only_calls).then_some(m.content.as_str()),
+        tool_calls: m
+            .tool_calls
+            .iter()
+            .map(|call| WireCall {
+                id: &call.id,
+                kind: "function",
+                function: WireCallFunction {
+                    name: &call.name,
+                    arguments: &call.arguments,
+                },
+                extra_content: call
+                    .provider_data
+                    .as_deref()
+                    .and_then(|data| serde_json::from_str(data).ok()),
+            })
+            .collect(),
+        tool_call_id: m.tool_call_id.as_deref(),
+    }
 }
 
 impl ChatProvider for OpenAiChat {
-    fn chat(&mut self, messages: &[Message]) -> Result<String, ChatError> {
+    fn chat(&mut self, messages: &[Message], tools: &[ToolSpec]) -> Result<Reply, ChatError> {
         let key = self.api_key.as_deref().ok_or(ChatError::MissingKey)?;
         let request = Request {
             model: &self.model,
-            messages: messages
+            messages: messages.iter().map(wire_message).collect(),
+            tools: tools
                 .iter()
-                .map(|m| WireMessage {
-                    role: match m.role {
-                        Role::System => "system",
-                        Role::User => "user",
-                        Role::Assistant => "assistant",
+                .map(|tool| WireTool {
+                    kind: "function",
+                    function: WireFunction {
+                        name: &tool.name,
+                        description: &tool.description,
+                        parameters: &tool.parameters,
                     },
-                    content: &m.content,
                 })
                 .collect(),
         };
@@ -167,16 +254,43 @@ fn transport_error(error: ureq::Error) -> ChatError {
     }
 }
 
-fn parse_reply(body: &str) -> Result<String, ChatError> {
+fn parse_reply(body: &str) -> Result<Reply, ChatError> {
     let completion: Completion = serde_json::from_str(body)
         .map_err(|e| ChatError::Other(format!("unreadable reply: {e}")))?;
-    completion
+    let message = completion
         .choices
         .into_iter()
         .next()
-        .and_then(|c| c.message.content)
+        .ok_or_else(|| ChatError::Other("empty reply".into()))?
+        .message;
+    if !message.tool_calls.is_empty() {
+        let calls = message
+            .tool_calls
+            .into_iter()
+            .enumerate()
+            .map(|(n, call)| ToolCall {
+                // Some servers leave ids out; the follow-up still needs one.
+                id: if call.id.is_empty() {
+                    format!("call-{n}")
+                } else {
+                    call.id
+                },
+                name: call.function.name,
+                arguments: call
+                    .function
+                    .arguments
+                    .filter(|a| !a.trim().is_empty())
+                    .unwrap_or_else(|| "{}".into()),
+                provider_data: call.extra_content.map(|data| data.to_string()),
+            })
+            .collect();
+        return Ok(Reply::ToolCalls(calls));
+    }
+    message
+        .content
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
+        .map(Reply::Text)
         .ok_or_else(|| ChatError::Other("empty reply".into()))
 }
 

@@ -5,8 +5,12 @@
 //! fakes in tests. It takes [`Input`] events and emits [`Output`] events for
 //! whatever window or panel is showing the conversation.
 
+mod actions;
 mod assistant;
 pub mod ports;
 
 pub use assistant::{Assistant, Input, Output};
-pub use ports::{ChatError, ChatProvider, Clock, Message, Ports, Role, Speaker, Store};
+pub use ports::{
+    Action, Actions, App, Bang, Browser, BrowserKind, ChatError, ChatProvider, Clock, Folder,
+    MediaKey, Message, Ports, Reply, Role, Speaker, Store, ToolCall, ToolSpec, Volume,
+};
