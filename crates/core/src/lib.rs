@@ -6,7 +6,12 @@
 //! whatever window or panel is showing the conversation.
 
 mod assistant;
+mod memory;
 pub mod ports;
+mod tools;
 
 pub use assistant::{Assistant, Input, Output};
-pub use ports::{ChatError, ChatProvider, Clock, Message, Ports, Role, Speaker, Store};
+pub use ports::{
+    ChatError, ChatProvider, ChatReply, Clock, MemoryHit, MemoryKind, Message, Ports, Role,
+    Speaker, Store, Tagged, ToolCall, ToolSpec,
+};

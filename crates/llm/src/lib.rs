@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use jarvis_core::{ChatError, ChatProvider, Message, Role};
+use jarvis_core::{ChatError, ChatProvider, ChatReply, Message, Role, ToolCall, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -78,12 +78,56 @@ fn agent(timeout: Duration) -> ureq::Agent {
 struct Request<'a> {
     model: &'a str,
     messages: Vec<WireMessage<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<WireTool<'a>>,
 }
 
 #[derive(Serialize)]
 struct WireMessage<'a> {
     role: &'static str,
-    content: &'a str,
+    /// `null` for an assistant turn that only calls tools.
+    content: Option<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<WireToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct WireTool<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireFunction<'a>,
+}
+
+#[derive(Serialize)]
+struct WireFunction<'a> {
+    name: &'a str,
+    description: &'a str,
+    parameters: Value,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireToolCall {
+    #[serde(default)]
+    id: String,
+    #[serde(rename = "type", default = "function_type")]
+    kind: String,
+    function: WireCall,
+    /// Gemini's thought signature, which must be sent back with the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extra_content: Option<Value>,
+}
+
+fn function_type() -> String {
+    "function".into()
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireCall {
+    name: String,
+    #[serde(default)]
+    arguments: String,
 }
 
 #[derive(Deserialize)]
@@ -99,24 +143,59 @@ struct Choice {
 #[derive(Deserialize)]
 struct ReplyMessage {
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<WireToolCall>,
 }
 
-impl ChatProvider for OpenAiChat {
-    fn chat(&mut self, messages: &[Message]) -> Result<String, ChatError> {
+fn wire_message(m: &Message) -> WireMessage<'_> {
+    let tool_calls: Vec<WireToolCall> = m
+        .tool_calls
+        .iter()
+        .map(|call| WireToolCall {
+            id: call.id.clone(),
+            kind: function_type(),
+            function: WireCall {
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            },
+            extra_content: call
+                .extra
+                .as_deref()
+                .and_then(|extra| serde_json::from_str(extra).ok()),
+        })
+        .collect();
+    WireMessage {
+        role: match m.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        },
+        content: (tool_calls.is_empty() || !m.content.is_empty()).then_some(m.content.as_str()),
+        tool_calls,
+        tool_call_id: m.tool_call_id.as_deref(),
+    }
+}
+
+fn wire_tool(spec: &ToolSpec) -> WireTool<'_> {
+    WireTool {
+        kind: "function",
+        function: WireFunction {
+            name: spec.name,
+            description: spec.description,
+            parameters: serde_json::from_str(spec.parameters)
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
+        },
+    }
+}
+
+impl OpenAiChat {
+    fn send(&mut self, messages: &[Message], tools: &[ToolSpec]) -> Result<ChatReply, ChatError> {
         let key = self.api_key.as_deref().ok_or(ChatError::MissingKey)?;
         let request = Request {
             model: &self.model,
-            messages: messages
-                .iter()
-                .map(|m| WireMessage {
-                    role: match m.role {
-                        Role::System => "system",
-                        Role::User => "user",
-                        Role::Assistant => "assistant",
-                    },
-                    content: &m.content,
-                })
-                .collect(),
+            messages: messages.iter().map(wire_message).collect(),
+            tools: tools.iter().map(wire_tool).collect(),
         };
 
         let mut response = self
@@ -156,6 +235,23 @@ impl ChatProvider for OpenAiChat {
     }
 }
 
+impl ChatProvider for OpenAiChat {
+    fn chat(&mut self, messages: &[Message]) -> Result<String, ChatError> {
+        match self.send(messages, &[])? {
+            ChatReply::Text(text) => Ok(text),
+            ChatReply::ToolCalls(_) => Err(ChatError::Other("unexpected tool call".into())),
+        }
+    }
+
+    fn chat_with_tools(
+        &mut self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+    ) -> Result<ChatReply, ChatError> {
+        self.send(messages, tools)
+    }
+}
+
 fn transport_error(error: ureq::Error) -> ChatError {
     match error {
         ureq::Error::Timeout(_) => ChatError::Timeout,
@@ -167,16 +263,39 @@ fn transport_error(error: ureq::Error) -> ChatError {
     }
 }
 
-fn parse_reply(body: &str) -> Result<String, ChatError> {
+fn parse_reply(body: &str) -> Result<ChatReply, ChatError> {
     let completion: Completion = serde_json::from_str(body)
         .map_err(|e| ChatError::Other(format!("unreadable reply: {e}")))?;
-    completion
+    let message = completion
         .choices
         .into_iter()
         .next()
-        .and_then(|c| c.message.content)
+        .ok_or_else(|| ChatError::Other("empty reply".into()))?
+        .message;
+    if !message.tool_calls.is_empty() {
+        return Ok(ChatReply::ToolCalls(
+            message
+                .tool_calls
+                .into_iter()
+                .enumerate()
+                .map(|(i, call)| ToolCall {
+                    id: if call.id.is_empty() {
+                        format!("call_{i}")
+                    } else {
+                        call.id
+                    },
+                    name: call.function.name,
+                    arguments: call.function.arguments,
+                    extra: call.extra_content.map(|extra| extra.to_string()),
+                })
+                .collect(),
+        ));
+    }
+    message
+        .content
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
+        .map(ChatReply::Text)
         .ok_or_else(|| ChatError::Other("empty reply".into()))
 }
 

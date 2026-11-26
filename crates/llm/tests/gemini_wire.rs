@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use jarvis_core::{ChatError, ChatProvider, Message, Role};
+use jarvis_core::{ChatError, ChatProvider, ChatReply, Message, Role, ToolCall, ToolSpec};
 use jarvis_llm::{OpenAiChat, gemini_key};
 use mockito::Matcher;
 use serde_json::json;
@@ -218,4 +218,114 @@ fn gemini_defaults() {
         "https://generativelanguage.googleapis.com/v1beta/openai/"
     );
     assert_eq!(jarvis_llm::DEFAULT_GEMINI_MODEL, "gemini-3.5-flash-lite");
+}
+
+const SEARCH: ToolSpec = ToolSpec {
+    name: "search_memory",
+    description: "Search memory.",
+    parameters: r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"#,
+};
+
+fn completion(message: serde_json::Value) -> String {
+    json!({"choices": [{"index": 0, "finish_reason": "stop", "message": message}]}).to_string()
+}
+
+#[test]
+fn offers_tools_and_returns_the_calls_the_model_makes() {
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1beta/openai/chat/completions")
+        .match_body(Matcher::PartialJson(json!({
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "search_memory",
+                    "description": "Search memory.",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+                },
+            }],
+        })))
+        .with_status(200)
+        .with_body(completion(json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "search_memory", "arguments": "{\"query\":\"Pune\"}"},
+                "extra_content": {"google": {"thought_signature": "sig"}},
+            }],
+        })))
+        .create();
+
+    let reply = client(&server).chat_with_tools(&conversation(), &[SEARCH]);
+
+    mock.assert();
+    assert_eq!(
+        reply,
+        Ok(ChatReply::ToolCalls(vec![ToolCall {
+            id: "call_1".into(),
+            name: "search_memory".into(),
+            arguments: r#"{"query":"Pune"}"#.into(),
+            extra: Some(r#"{"google":{"thought_signature":"sig"}}"#.into()),
+        }]))
+    );
+}
+
+#[test]
+fn tool_calls_and_results_go_back_on_the_wire() {
+    let call = ToolCall {
+        id: "call_1".into(),
+        name: "search_memory".into(),
+        arguments: r#"{"query":"Pune"}"#.into(),
+        extra: Some(r#"{"google":{"thought_signature":"sig"}}"#.into()),
+    };
+    let mut messages = conversation();
+    messages.push(Message::tool_request(vec![call.clone()]));
+    messages.push(Message::tool_result(&call, "Nothing found."));
+
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1beta/openai/chat/completions")
+        .match_body(Matcher::PartialJson(json!({
+            "messages": [
+                {"role": "system"}, {"role": "user"}, {"role": "assistant"}, {"role": "user"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "search_memory", "arguments": "{\"query\":\"Pune\"}"},
+                        "extra_content": {"google": {"thought_signature": "sig"}},
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "Nothing found."},
+            ],
+        })))
+        .with_status(200)
+        .with_body(completion(
+            json!({"role": "assistant", "content": "I don't recall."}),
+        ))
+        .create();
+
+    let reply = client(&server).chat_with_tools(&messages, &[SEARCH]);
+
+    mock.assert();
+    assert_eq!(reply, Ok(ChatReply::Text("I don't recall.".into())));
+}
+
+#[test]
+fn plain_chat_offers_no_tools() {
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1beta/openai/chat/completions")
+        .match_request(|request| {
+            !String::from_utf8_lossy(request.body().unwrap()).contains("\"tools\"")
+        })
+        .with_status(200)
+        .with_body(completion(json!({"role": "assistant", "content": "Four."})))
+        .create();
+
+    assert_eq!(client(&server).chat(&conversation()), Ok("Four.".into()));
+    mock.assert();
 }

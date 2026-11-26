@@ -2,10 +2,18 @@
 
 use std::time::{Duration, SystemTime};
 
-use crate::ports::{ChatError, Message, Ports, Role};
+use crate::memory;
+use crate::ports::{ChatError, ChatReply, Message, Ports, Role};
+use crate::tools;
 
 /// Idle time after which the next question starts a new conversation.
 pub const CONVERSATION_IDLE_RESET: Duration = Duration::from_secs(5 * 60);
+
+/// Most model requests for one question (each tool round is one more).
+const MAX_TOOL_ROUNDS: usize = 4;
+
+/// Said after a note is saved.
+const NOTED: &str = "Noted.";
 
 /// Sent first in every request. Jarvis must not say its own name, or it
 /// could wake itself through the speakers (the only echo handling planned).
@@ -19,6 +27,11 @@ Never say \"Jarvis\" in a reply, not even when the user calls you that.";
 pub enum Input {
     /// The user typed a question and pressed Enter.
     Typed(String),
+    /// Sent by the app every few seconds, so an idle conversation ends (and
+    /// is summarised) without waiting for the next question.
+    Tick,
+    /// Delete saved conversation history (notes are kept) and start afresh.
+    ClearHistory,
 }
 
 /// An update for the window or panel showing the conversation.
@@ -55,6 +68,13 @@ impl Assistant {
     pub fn handle(&mut self, input: Input, emit: &mut dyn FnMut(Output)) {
         match input {
             Input::Typed(text) => self.answer(text, emit),
+            Input::Tick => self.reset_if_idle(emit),
+            Input::ClearHistory => {
+                self.ports.store.clear_history();
+                self.history.clear();
+                self.last_activity = None;
+                emit(Output::ConversationReset);
+            }
         }
     }
 
@@ -69,7 +89,11 @@ impl Assistant {
         request.extend(self.history.iter().cloned());
         request.push(question.clone());
 
-        match self.ports.chat.chat(&request) {
+        let outcome = match memory::note_text(&question.content) {
+            Some(note) => self.save_note(note),
+            None => self.chat_running_tools(request),
+        };
+        match outcome {
             Ok(reply) => {
                 let reply = Message::new(Role::Assistant, reply);
                 self.remember(question);
@@ -77,9 +101,43 @@ impl Assistant {
                 self.ports.speaker.speak(&reply.content);
                 emit(Output::Reply(reply.content));
             }
-            Err(error) => emit(Output::Problem(describe(&error))),
+            Err(problem) => emit(Output::Problem(problem)),
         }
         self.last_activity = Some(self.ports.clock.now());
+    }
+
+    /// Save a note with model-written tags; the confirmation is the reply.
+    fn save_note(&mut self, note: &str) -> Result<String, String> {
+        let tagged = memory::summarize(self.ports.chat.as_mut(), note);
+        let now = self.ports.clock.now();
+        self.ports
+            .store
+            .save_note(now, note, &tagged)
+            .map(|_| NOTED.to_string())
+            .map_err(|reason| format!("Couldn't save the note: {reason}"))
+    }
+
+    /// Ask the model, running any tools it calls, until it answers in text.
+    /// Tool calls and results live only in this request, not in the history.
+    fn chat_running_tools(&mut self, mut request: Vec<Message>) -> Result<String, String> {
+        for _ in 0..MAX_TOOL_ROUNDS {
+            let reply = self
+                .ports
+                .chat
+                .chat_with_tools(&request, tools::SPECS)
+                .map_err(|error| describe(&error))?;
+            let calls = match reply {
+                ChatReply::Text(text) => return Ok(text),
+                ChatReply::ToolCalls(calls) => calls,
+            };
+            let results: Vec<Message> = calls
+                .iter()
+                .map(|call| Message::tool_result(call, tools::run(call, &mut self.ports)))
+                .collect();
+            request.push(Message::tool_request(calls));
+            request.extend(results);
+        }
+        Err("The model kept calling tools without answering.".into())
     }
 
     fn remember(&mut self, message: Message) {
@@ -99,10 +157,22 @@ impl Assistant {
             .duration_since(last)
             .unwrap_or_default();
         if idle >= CONVERSATION_IDLE_RESET {
-            self.history.clear();
-            self.last_activity = None;
+            self.end_conversation();
             emit(Output::ConversationReset);
         }
+    }
+
+    /// Close the current conversation: one model call writes its summary
+    /// and tags, then the store makes it searchable.
+    fn end_conversation(&mut self) {
+        let history = std::mem::take(&mut self.history);
+        self.last_activity = None;
+        if history.is_empty() {
+            return;
+        }
+        let tagged = memory::summarize(self.ports.chat.as_mut(), &memory::transcript(&history));
+        let now = self.ports.clock.now();
+        self.ports.store.end_conversation(now, &tagged);
     }
 }
 
